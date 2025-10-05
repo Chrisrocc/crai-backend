@@ -1,0 +1,2 @@
+{"ts":"2025-09-18T10:43:54.478Z","id":"ae90bb0f-8bd4-4805-bf27-b1e6bf23bece","chatId":"upload:68b82d33c0c6d3130340ab84","type":"vision.response","summary":"Gemini -> features:0 damages:0","out":{"features":[],"damages":[],"notes":"","raw":"","meta":{"provider":"gemini","model":"gemini-1.5-flash"}}}
+{"ts":"2025-09-18T10:43:54.486Z","id":"ae90bb0f-8bd4-4805-bf27-b1e6bf23bece","chatId":"upload:68b82d33c0c6d3130340ab84","type":"vision.enrich","summary":"Car QDE011: +0 features, +0 damages","out":{"Features":"—","Damages":"—","Inspection":"None"}}

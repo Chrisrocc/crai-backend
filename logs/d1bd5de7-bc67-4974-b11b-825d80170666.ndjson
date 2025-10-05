@@ -1,0 +1,2 @@
+{"ts":"2025-09-18T05:38:29.507Z","id":"d1bd5de7-bc67-4974-b11b-825d80170666","chatId":"upload:68cb8fd9c376640c9c9123e3","type":"vision.analyze","summary":"analyzed key:2025-09-18T05-38-26-319Z-dmax-odo.jpeg f:0 d:0","out":{"features":[],"damages":[],"meta":{"provider":"gemini","model":"gemini-1.5-flash"}}}
+{"ts":"2025-09-18T05:38:29.514Z","id":"d1bd5de7-bc67-4974-b11b-825d80170666","chatId":"upload:68cb8fd9c376640c9c9123e3","type":"vision.enrich","summary":"car:1QY6SW +features:0 +damages:0","out":{"description":"Canopy","checklist":[]}}

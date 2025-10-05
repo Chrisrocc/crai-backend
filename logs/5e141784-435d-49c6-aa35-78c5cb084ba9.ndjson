@@ -1,0 +1,2 @@
+{"ts":"2025-09-28T02:59:11.661Z","id":"5e141784-435d-49c6-aa35-78c5cb084ba9","chatId":"upload:68d7cc94c547c7e37317d726","type":"vision.enrich","summary":"car:1KY8IO features:0 colours:0 damages:0 inspect:0","out":{"description":"","checklist":[]}}
+{"ts":"2025-09-28T02:59:11.656Z","id":"5e141784-435d-49c6-aa35-78c5cb084ba9","chatId":"upload:68d7cc94c547c7e37317d726","type":"vision.response","summary":"gemini f:0 d:0 colours:0 inspect:0","out":{"features":[],"colours":[],"damages":[],"inspect":[],"raw":"{}"}}

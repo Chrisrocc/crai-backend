@@ -1,0 +1,2 @@
+{"ts":"2025-09-28T03:00:19.154Z","id":"3db5ed0d-a891-4cea-aae9-80ff6a9781f2","chatId":"upload:68b82d33c0c6d3130340ab83","type":"vision.response","summary":"gemini f:0 d:0 colours:0 inspect:0","out":{"features":[],"colours":[],"damages":[],"inspect":[],"raw":"{}"}}
+{"ts":"2025-09-28T03:00:19.179Z","id":"3db5ed0d-a891-4cea-aae9-80ff6a9781f2","chatId":"upload:68b82d33c0c6d3130340ab83","type":"vision.enrich","summary":"car:NJU692 features:0 colours:0 damages:0 inspect:0","out":{"description":"","checklist":["Tyres"]}}

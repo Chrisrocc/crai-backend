@@ -9,26 +9,25 @@ const JWT_SECRET = process.env.JWT_SECRET || "changeme"; // set a real one in .e
 const MASTER_PASSWORD = process.env.MASTER_PASSWORD || "Fast5";
 
 // Decide cookie attributes based on env.
-// In dev (localhost over http): secure=false, sameSite='lax' (or 'strict' if you prefer).
-// In prod (HTTPS / different domain frontends): set COOKIE_SECURE=true and SAMESITE=none in env.
+// In prod (HTTPS / cross-site): MUST be SameSite=None; Secure
 function cookieOpts() {
-  const secure =
-    String(process.env.COOKIE_SECURE || "").toLowerCase() === "true" ||
-    process.env.NODE_ENV === "production";
-
-  // valid values: 'lax' (default), 'strict', 'none'
-  let sameSite = (process.env.SAMESITE || "lax").toLowerCase();
-  if (sameSite === "none" && !secure) {
-    // SameSite=None requires Secure.
-    sameSite = "lax";
+  const isProd = process.env.NODE_ENV === "production";
+  if (isProd) {
+    return {
+      httpOnly: true,
+      secure: true,
+      sameSite: "None",
+      path: "/",
+      maxAge: 1000 * 60 * 60 * 8, // 8 hours
+    };
   }
-
+  // Local dev over http://localhost
   return {
     httpOnly: true,
-    secure,                // true only when served via HTTPS
-    sameSite,              // 'lax' by default; use 'none' with HTTPS across domains
+    secure: false,
+    sameSite: "Lax",
     path: "/",
-    maxAge: 1000 * 60 * 60 * 8, // 8 hours
+    maxAge: 1000 * 60 * 60 * 8,
   };
 }
 
@@ -39,7 +38,6 @@ function sign(payload) {
 // ---------- Routes ----------
 
 // POST /api/auth/login  { password }
-// src/routes/auth.js — replace ONLY the /login route below
 router.post("/login", (req, res) => {
   try {
     const { password } = req.body || {};
@@ -49,10 +47,10 @@ router.post("/login", (req, res) => {
 
     const token = sign({ role: "user" });
 
-    // keep backend cookie (helps Safari/dev)
+    // Keep backend cookie (so /api/auth/me works)
     res.cookie("sid", token, cookieOpts());
 
-    // ALSO return token so the Cloudflare Pages Function can set a 1st-party cookie
+    // ALSO return token (useful if you later add a CF Pages Function to set a 1P cookie)
     return res.status(200).json({ message: "ok", token });
   } catch (e) {
     console.error("Auth login error:", e);
@@ -60,14 +58,12 @@ router.post("/login", (req, res) => {
   }
 });
 
-
 // GET /api/auth/me
 router.get("/me", (req, res) => {
   const token = req.cookies?.sid;
   if (!token) return res.status(401).json({ message: "Not logged in" });
   try {
     const payload = jwt.verify(token, JWT_SECRET);
-    // if you want to return info later, add to payload when signing
     return res.json({ ok: true, user: { role: payload.role || "user" } });
   } catch {
     res.clearCookie("sid", { ...cookieOpts(), maxAge: 0 });

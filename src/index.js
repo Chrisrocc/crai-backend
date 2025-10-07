@@ -76,6 +76,15 @@ app.use(express.json({ limit: "5mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
+/** Quick cookie debug endpoint (helps confirm cookie presence from the frontend domain) */
+app.get("/api/auth/debug-cookie", (req, res) => {
+  res.json({
+    origin: req.headers.origin || null,
+    cookies: req.cookies || {},
+    authHeader: req.headers.authorization || null,
+  });
+});
+
 // Health
 app.get("/ping", (_req, res) => res.json({ ok: true, t: Date.now() }));
 

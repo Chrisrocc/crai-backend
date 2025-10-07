@@ -1,6 +1,5 @@
 // src/services/ai/visionEnrichment.js
 require('dotenv').config();
-const axios = require('axios');
 const path = require('path');
 const Car = require('../../models/Car');
 const audit = require('../logging/auditLogger');
@@ -138,7 +137,6 @@ If unsure, include with confidence 0.4–0.7.
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         contents: [{ role: 'user', parts }],
-        // not forcing responseMimeType; we’ll robustly parse whatever comes
         generationConfig: { temperature: 0.2 }
       })
     });
@@ -225,10 +223,12 @@ async function analyzeWithGemini({ bytes, mimeType = 'image/jpeg', caption = '' 
    ========================= */
 async function analyzeCarS3Key({ key, caption = '' }, tctx) {
   const url = await getSignedViewUrl(key, 300);
-  const file = await axios.get(url, { responseType: 'arraybuffer' });
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`S3 signed URL fetch ${res.status}`);
+  const bytes = Buffer.from(await res.arrayBuffer());
   const ext = path.extname(key).toLowerCase();
   const mime = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
-  return analyzeWithGemini({ bytes: file.data, mimeType: mime, caption }, tctx);
+  return analyzeWithGemini({ bytes, mimeType: mime, caption }, tctx);
 }
 
 /* =========================

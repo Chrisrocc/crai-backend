@@ -1,7 +1,6 @@
 // src/bots/telegram.js
 require('dotenv').config();
 const { Telegraf } = require('telegraf');
-const axios = require('axios');
 
 const { Batcher } = require('../services/batcher');
 const { processBatch } = require('../services/ai/pipeline');
@@ -184,8 +183,9 @@ bot.on('photo', async (ctx) => {
     const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${info.file_path}`;
     const filename = info.file_path.split('/').pop() || '';
 
-    const resp = await axios.get(fileUrl, { responseType: 'arraybuffer' });
-    const buffer = Buffer.from(resp.data);
+    const resp = await fetch(fileUrl);
+    if (!resp.ok) throw new Error(`telegram file fetch ${resp.status}`);
+    const buffer = Buffer.from(await resp.arrayBuffer());
     const mimeType = guessImageMime(buffer, filename);
     const base64 = buffer.toString('base64');
 
@@ -197,20 +197,28 @@ bot.on('photo', async (ctx) => {
 
     if (veh.rego && veh.make && veh.model) {
       try {
-        const rresp = await axios.post(
+        const rresp = await fetch(
           `${process.env.BACKEND_URL || 'http://localhost:5000'}/api/cars/resolve-rego`,
           {
-            regoOCR: veh.rego,
-            make: veh.make,
-            model: veh.model,
-            color: veh.color,
-            ocrConfidence: veh.confidence || 0.9,
-            apply: true
-          },
-          { headers: { 'X-Chat-Id': String(ctx.chat.id) } }
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'X-Chat-Id': String(ctx.chat.id),
+            },
+            body: JSON.stringify({
+              regoOCR: veh.rego,
+              make: veh.make,
+              model: veh.model,
+              color: veh.color,
+              ocrConfidence: veh.confidence || 0.9,
+              apply: true,
+            }),
+          }
         );
 
-        const r = rresp.data?.data || {};
+        if (!rresp.ok) throw new Error(`resolve-rego ${rresp.status}`);
+        const rjson = await rresp.json();
+        const r = rjson?.data || {};
         console.log('[RegoResolver]', JSON.stringify(r, null, 2));
 
         const dist = r.distances

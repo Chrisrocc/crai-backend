@@ -39,20 +39,27 @@ function sign(payload) {
 // ---------- Routes ----------
 
 // POST /api/auth/login  { password }
+// src/routes/auth.js — replace ONLY the /login route below
 router.post("/login", (req, res) => {
   try {
     const { password } = req.body || {};
     if (!password || password !== MASTER_PASSWORD) {
       return res.status(401).json({ message: "Invalid password" });
     }
+
     const token = sign({ role: "user" });
+
+    // keep backend cookie (helps Safari/dev)
     res.cookie("sid", token, cookieOpts());
-    return res.json({ message: "ok" });
+
+    // ALSO return token so the Cloudflare Pages Function can set a 1st-party cookie
+    return res.status(200).json({ message: "ok", token });
   } catch (e) {
     console.error("Auth login error:", e);
     return res.status(500).json({ message: "Server error" });
   }
 });
+
 
 // GET /api/auth/me
 router.get("/me", (req, res) => {

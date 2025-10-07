@@ -24,14 +24,11 @@ const requireAuth = require("./middleware/requireAuth");
 const app = express();
 const port = process.env.PORT || 5000;
 
-// Trust proxy so secure cookies + X-Forwarded-* work behind Railway
+// Trust proxy so secure cookies work behind proxies (Railway/Render/CF)
 app.set("trust proxy", 1);
 
 /* --------------------------  C O R S  -------------------------- */
-// Base Cloudflare Pages host (production) — change if you rename the project
 const BASE_PAGES_HOST = "crai-frontend.pages.dev";
-
-// Optional explicit origins from env (comma-separated)
 const FRONTEND_URLS = (process.env.FRONTEND_URL || "http://localhost:5173")
   .split(",")
   .map(s => s.trim())
@@ -41,16 +38,9 @@ function isAllowedOrigin(origin) {
   try {
     const u = new URL(origin);
     const host = u.hostname;
-
-    // Allow production host
     if (host === BASE_PAGES_HOST) return true;
-
-    // Allow ANY preview subdomain like 8343bbd8.crai-frontend.pages.dev
-    if (host.endsWith("." + BASE_PAGES_HOST)) return true;
-
-    // Allow anything explicitly listed in FRONTEND_URL
+    if (host.endsWith("." + BASE_PAGES_HOST)) return true; // preview subdomains
     if (FRONTEND_URLS.includes(origin)) return true;
-
     return false;
   } catch {
     return false;
@@ -60,13 +50,12 @@ function isAllowedOrigin(origin) {
 app.use(
   cors({
     origin(origin, cb) {
-      // allow curl/Postman/no-origin
-      if (!origin) return cb(null, true);
+      if (!origin) return cb(null, true); // curl/Postman/same-origin
       if (isAllowedOrigin(origin)) return cb(null, true);
       return cb(new Error(`CORS: Origin ${origin} not allowed`));
     },
     credentials: true,
-    optionsSuccessStatus: 204, // preflight OK for Safari/Brave
+    optionsSuccessStatus: 204,
   })
 );
 /* --------------------------------------------------------------- */
@@ -76,32 +65,32 @@ app.use(express.json({ limit: "5mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-/** Quick cookie debug endpoint (helps confirm cookie presence from the frontend domain) */
+// Quick cookie/auth debug (PUBLIC)
 app.get("/api/auth/debug-cookie", (req, res) => {
   res.json({
     origin: req.headers.origin || null,
+    host: req.headers.host || null,
+    forwardedProto: req.headers["x-forwarded-proto"] || null,
     cookies: req.cookies || {},
-    authHeader: req.headers.authorization || null,
   });
 });
 
-// Health
+// Health (PUBLIC)
 app.get("/ping", (_req, res) => res.json({ ok: true, t: Date.now() }));
 
-// Public routes
+// --- PUBLIC AUTH ROUTES ---
 app.use("/api/auth", authRoutes);
 
-// Protected routes
-app.use("/api", requireAuth);
-app.use("/api/cars", carsRouter);
-app.use("/api/customer-appointments", customerAppointmentsRouter);
-app.use("/api/reconditioner-categories", reconditionerCategoriesRouter);
-app.use("/api/reconditioner-appointments", reconditionerAppointmentsRouter);
-app.use("/api/tasks", tasksRouter);
-app.use("/api/photos", photoRoutes);
-app.use("/api/recon", reconIngestRoutes);
-app.use("/api/cars", carImportRouter);
-app.use("/api/cars", autogateSyncRoutes);
+// --- PROTECTED ROUTES (mount guard per router) ---
+app.use("/api/cars", requireAuth, carsRouter);
+app.use("/api/customer-appointments", requireAuth, customerAppointmentsRouter);
+app.use("/api/reconditioner-categories", requireAuth, reconditionerCategoriesRouter);
+app.use("/api/reconditioner-appointments", requireAuth, reconditionerAppointmentsRouter);
+app.use("/api/tasks", requireAuth, tasksRouter);
+app.use("/api/photos", requireAuth, photoRoutes);
+app.use("/api/recon", requireAuth, reconIngestRoutes);
+app.use("/api/cars", requireAuth, carImportRouter);
+app.use("/api/cars", requireAuth, autogateSyncRoutes);
 
 // Root
 app.get("/", (_req, res) => res.json({ message: "Welcome to CRAI Backend" }));
@@ -127,17 +116,7 @@ async function start() {
       console.log(`CORS Pages host allowed: ${BASE_PAGES_HOST} and all *.${BASE_PAGES_HOST}`);
     });
 
-    // Telegram bot (unchanged)
-    const disableBot = String(process.env.DISABLE_BOT || "").toLowerCase() === "true";
-    if (!disableBot && process.env.TELEGRAM_BOT_TOKEN) {
-      const { bot } = require("./bots/telegram");
-      try { await bot.telegram.deleteWebhook(); } catch (e) { console.warn("deleteWebhook warning:", e.message); }
-      await bot.launch();
-      console.log("🤖 CarYardBot running (polling)");
-    } else {
-      console.log("Telegram bot disabled or token not set.");
-    }
-
+    // graceful shutdown
     const shutdown = async (signal) => {
       console.log(`\nReceived ${signal}, shutting down...`);
       try { if (mongoose.connection.readyState) await mongoose.disconnect(); } catch (e) {

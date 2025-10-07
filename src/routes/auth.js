@@ -9,64 +9,41 @@ const JWT_SECRET = process.env.JWT_SECRET || "changeme"; // set real secret in p
 const MASTER_PASSWORD = process.env.MASTER_PASSWORD || "Fast5";
 const ALLOW_LOGIN_DEV = String(process.env.ALLOW_LOGIN_DEV || "").toLowerCase() === "true";
 
-/**
- * Determine if the request is cross-site and whether it's HTTPS.
- * We compute cookie flags PER REQUEST so localhost dev and HTTPS prod both work.
- */
+/** Compute cookie flags PER REQUEST so localhost & Pages both work */
 function cookieOpts(req) {
   const origin = req.headers.origin || "";
-  const host = req.headers.host || "";            // e.g., "localhost:5000" or "api.example.com"
+  const host = req.headers.host || "";           // "localhost:5000" or "api.domain.com"
   const reqHostOnly = host.split(":")[0].toLowerCase();
-  let originHostOnly = "";
-  try {
-    originHostOnly = new URL(origin).hostname.toLowerCase();
-  } catch {
-    // no/invalid Origin -> treat as same-site (curl/Postman or same-origin fetch)
-    originHostOnly = reqHostOnly;
-  }
-
-  const isCrossSite = originHostOnly && originHostOnly !== reqHostOnly;
+  let originHostOnly = reqHostOnly;
+  try { originHostOnly = new URL(origin).hostname.toLowerCase(); } catch {}
+  const isCrossSite = originHostOnly !== reqHostOnly;
   const isHttps = req.secure || (req.headers["x-forwarded-proto"] || "").toLowerCase() === "https";
-
-  // Chrome/Brave require Secure when SameSite=None.
   const sameSite = isCrossSite ? "None" : "Lax";
   const secure = isHttps || sameSite === "None";
-
-  return {
-    httpOnly: true,
-    secure,
-    sameSite,
-    path: "/",
-    maxAge: 1000 * 60 * 60 * 8, // 8h
-  };
+  return { httpOnly: true, secure, sameSite, path: "/", maxAge: 1000 * 60 * 60 * 8 };
 }
 
 function sign(payload) {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: "8h" });
 }
 
-/** Quick: confirm server auth config from the client */
+/** PUBLIC: sanity endpoint */
 router.get("/ping", (req, res) => {
   const opts = cookieOpts(req);
+  console.log("[/auth/ping] origin=%s host=%s sameSite=%s secure=%s", req.headers.origin, req.headers.host, opts.sameSite, opts.secure);
   res.json({
     ok: true,
     nodeEnv: process.env.NODE_ENV || null,
     cookie: { secure: !!opts.secure, sameSite: opts.sameSite },
-    masterPasswordLen: (MASTER_PASSWORD || "").length, // no secret leak
+    masterPasswordLen: (MASTER_PASSWORD || "").length,
     jwtSecretSet: JWT_SECRET !== "changeme",
     allowLoginDev: ALLOW_LOGIN_DEV,
-    seenOrigin: req.headers.origin || null,
-    seenHost: req.headers.host || null,
-    forwardedProto: req.headers["x-forwarded-proto"] || null,
   });
 });
-
-// ---------- Routes ----------
 
 // POST /api/auth/login  { password }
 router.post("/login", (req, res) => {
   try {
-    // Basic sanity (don’t print password)
     const bodyKeys = req.body ? Object.keys(req.body) : [];
     console.log("[/login] origin=%s host=%s keys=%j", req.headers.origin, req.headers.host, bodyKeys);
 
@@ -74,22 +51,18 @@ router.post("/login", (req, res) => {
       return res.status(400).json({ message: "Bad request: no JSON body" });
     }
 
-    // Accept common aliases to be safe
     const raw = req.body.password ?? req.body.pass ?? req.body.code ?? "";
     const password = typeof raw === "string" ? raw.trim() : "";
 
     if (!password || password !== MASTER_PASSWORD) {
       return res.status(401).json({
         message: "Invalid password",
-        hint: "Check MASTER_PASSWORD in backend env matches what you type (no spaces).",
+        hint: "Check MASTER_PASSWORD in backend env matches what you type.",
       });
     }
 
     const token = sign({ role: "user" });
-
-    // Set cookie using per-request flags
-    res.cookie("sid", token, cookieOpts(req));
-
+    res.cookie("sid", token, cookieOpts(req)); // set cookie
     return res.status(200).json({ message: "ok", token });
   } catch (e) {
     console.error("Auth login error:", e);
@@ -97,8 +70,7 @@ router.post("/login", (req, res) => {
   }
 });
 
-// Optional DEV backdoor (for cookie flow debugging)
-// Enable with ALLOW_LOGIN_DEV=true in env, then: POST /api/auth/login-dev
+// Optional: DEV login to test cookie flow
 router.post("/login-dev", (req, res) => {
   if (!ALLOW_LOGIN_DEV) return res.status(403).json({ message: "Disabled" });
   const token = sign({ role: "user", dev: true });
@@ -125,7 +97,7 @@ router.post("/logout", (req, res) => {
   return res.json({ message: "bye" });
 });
 
-// Optional: GET /api/auth/logout
+// Optional GET logout
 router.get("/logout", (req, res) => {
   res.clearCookie("sid", { ...cookieOpts(req), maxAge: 0 });
   return res.json({ message: "bye" });

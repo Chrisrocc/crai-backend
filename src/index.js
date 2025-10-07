@@ -21,6 +21,14 @@ const autogateSyncRoutes = require("./routes/autogateSync");
 const authRoutes = require("./routes/auth");
 const requireAuth = require("./middleware/requireAuth");
 
+// Telegram (do NOT launch here; we decide polling vs webhook below)
+let bot = null;
+try {
+  ({ bot } = require("./bots/telegram"));
+} catch (e) {
+  console.warn("[telemetry] telegram bot unavailable:", e.message);
+}
+
 const app = express();
 const port = process.env.PORT || 5000;
 
@@ -31,7 +39,7 @@ app.set("trust proxy", 1);
 const BASE_PAGES_HOST = "crai-frontend.pages.dev";
 const FRONTEND_URLS = (process.env.FRONTEND_URL || "http://localhost:5173")
   .split(",")
-  .map(s => s.trim())
+  .map((s) => s.trim())
   .filter(Boolean);
 
 function isAllowedOrigin(origin) {
@@ -81,6 +89,30 @@ app.get("/ping", (_req, res) => res.json({ ok: true, t: Date.now() }));
 // --- PUBLIC AUTH ROUTES ---
 app.use("/api/auth", authRoutes);
 
+/* -------------------- TELEGRAM WEBHOOK (PUBLIC) --------------------
+   We support BOTH webhook and polling:
+   - If TELEGRAM_WEBHOOK_DOMAIN is set, we register a webhook at:
+       POST https://<domain>/telegram/webhook
+   - Otherwise we fall back to long polling.
+------------------------------------------------------------------- */
+const TG_WEBHOOK_PATH = "/telegram/webhook";
+const TG_WEBHOOK_DOMAIN = process.env.TELEGRAM_WEBHOOK_DOMAIN || ""; // e.g. crai-backend-production.up.railway.app
+let stopTelegram = null; // function to stop bot gracefully
+
+if (bot) {
+  app.post(
+    TG_WEBHOOK_PATH,
+    // Telegram sends no CORS and doesn't need cookies; just ensure JSON body is parsed
+    express.json({ limit: "2mb" }),
+    (req, res, next) => {
+      // If we're in polling mode, ignore webhook hits
+      if (!bot?.webhookReply) return res.status(200).end();
+      return require("./bots/telegram").bot.webhookCallback(TG_WEBHOOK_PATH)(req, res, next);
+    }
+  );
+}
+// -------------------------------------------------------------------
+
 // --- PROTECTED ROUTES (mount guard per router) ---
 app.use("/api/cars", requireAuth, carsRouter);
 app.use("/api/customer-appointments", requireAuth, customerAppointmentsRouter);
@@ -110,23 +142,64 @@ async function start() {
     await mongoose.connect(process.env.MONGO_URI);
     console.log("Connected to MongoDB");
 
+    // Start HTTP server
     server = app.listen(port, () => {
       console.log(`Backend running on http://localhost:${port}`);
       console.log("CORS explicit FRONTEND_URLs:", FRONTEND_URLS);
       console.log(`CORS Pages host allowed: ${BASE_PAGES_HOST} and all *.${BASE_PAGES_HOST}`);
     });
 
+    // Start Telegram (choose webhook vs polling)
+    if (bot) {
+      if (TG_WEBHOOK_DOMAIN) {
+        const proto = "https";
+        const url = `${proto}://${TG_WEBHOOK_DOMAIN}${TG_WEBHOOK_PATH}`;
+        try {
+          await bot.telegram.setWebhook(url);
+          console.log(`[telegram] webhook set: ${url}`);
+          // In webhook mode, Telegraf uses webhookCallback middleware (mounted above)
+          stopTelegram = async () => {
+            try {
+              await bot.telegram.deleteWebhook();
+              console.log("[telegram] webhook deleted");
+            } catch (e) {
+              console.warn("[telegram] deleteWebhook failed:", e.message);
+            }
+          };
+        } catch (e) {
+          console.error("[telegram] setWebhook failed, falling back to polling:", e.message);
+          await bot.launch();
+          console.log("[telegram] launched in polling mode (fallback)");
+          stopTelegram = async () => bot.stop("SIGTERM");
+        }
+      } else {
+        await bot.launch();
+        console.log("[telegram] launched in polling mode");
+        stopTelegram = async () => bot.stop("SIGTERM");
+      }
+    }
+
     // graceful shutdown
     const shutdown = async (signal) => {
       console.log(`\nReceived ${signal}, shutting down...`);
-      try { if (mongoose.connection.readyState) await mongoose.disconnect(); } catch (e) {
+      try {
+        if (stopTelegram) await stopTelegram();
+      } catch (e) {
+        console.warn("Telegram stop error:", e.message);
+      }
+      try {
+        if (mongoose.connection.readyState) await mongoose.disconnect();
+      } catch (e) {
         console.error("Mongo disconnect error:", e.message);
       }
-      if (server) server.close(() => {
-        console.log("HTTP server closed.");
+      if (server) {
+        server.close(() => {
+          console.log("HTTP server closed.");
+          process.exit(0);
+        });
+      } else {
         process.exit(0);
-      });
-      else process.exit(0);
+      }
     };
     process.on("SIGINT", () => shutdown("SIGINT"));
     process.on("SIGTERM", () => shutdown("SIGTERM"));
@@ -137,3 +210,4 @@ async function start() {
 }
 
 start();
+

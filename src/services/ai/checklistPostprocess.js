@@ -1,63 +1,45 @@
-// One simple AI post-process step to clean + dedupe checklist lines.
-// Input: array of strings (any phrasing).
-// Output: array of strings, each **exactly** "Inspect <Damage> - <Location>"
-// Fallback: local normalizeChecklist() if model fails.
+// src/services/ai/checklistPostprocess.js
+const { geminiGenerate } = require('./llmClient'); // uses REST; harmless if no key
 
-const { chatJSON } = require('./llmClient');
-const { normalizeChecklist, toInspectCanonical } = require('./checklistDeduper');
-
-const SYSTEM = `
-You will receive a list of short vehicle checklist lines extracted from photos.
-Your job is to CLEAN, DEDUPLICATE, and UNIFY the lines.
-
-Return STRICT MINIFIED JSON ONLY (no markdown, no comments), with this schema:
-{"sentences":["Inspect <Damage> - <Location>", ...]}
-
-Rules:
-- Every item MUST be exactly: "Inspect <Damage> - <Location>".
-- Use these canonical damages (case-sensitive): Dent | Scratch | Crack | Rust | Paint Peel | Hail Damage | Burn
-- Map synonyms:
-  scuff/scrape → Scratch
-  ding/dint → Dent
-  chipped/chip → Scratch
-  cracked → Crack
-  corrosion → Rust
-  clear coat/peeling/peel → Paint Peel
-  hail → Hail Damage
-  melt/heat damage → Burn
-- <Location> must be short, Title Case (e.g., "Front Left Fender", "Rear Bumper Lower Left", "Driver Seat", "Alloy Wheel Rim").
-- Remove duplicates and near-duplicates that describe the same damage and spot (even if wording differs).
-  Prefer a concise, readable phrasing.
-- Discard non-damage lines (features/colours/accessories).
-- Limit the final list to ≤ 60 items.
-`.trim();
-
-/**
- * Clean & dedupe via LLM, with robust fallback to local normalizer.
- * @param {string[]} rawLines
- * @returns {Promise<string[]>}
- */
-async function aiDedupeAndFormat(rawLines = []) {
-  const lines = (Array.isArray(rawLines) ? rawLines : [])
-    .map(s => String(s || '').trim())
-    .filter(Boolean);
-
-  if (lines.length === 0) return [];
-
-  try {
-    const user = lines.join('\n');
-    const out = await chatJSON({ system: SYSTEM, user, temperature: 0 });
-    const sentences = Array.isArray(out?.sentences) ? out.sentences : [];
-    if (sentences.length) {
-      // Second-pass local guard (canonicalize + fuzzy de-dupe)
-      return normalizeChecklist(sentences);
-    }
-  } catch (e) {
-    console.warn('aiDedupeAndFormat LLM error:', e.message);
-  }
-
-  // Fallback: local canonicalize + fuzzy de-dupe
-  return normalizeChecklist(lines.map(toInspectCanonical));
+function extractJson(s) {
+  if (!s) return {};
+  const t = String(s).trim().replace(/^```json\s*|\s*```$/g, '');
+  const m = t.match(/\{[\s\S]*\}$/);
+  try { return JSON.parse(m ? m[0] : t); } catch { return {}; }
 }
 
-module.exports = { aiDedupeAndFormat };
+/**
+ * Input: freeform short findings, one per item (e.g. ["scratch front left fender", "dent rear bumper"])
+ * Output: { description: "comma words", checklist: ["Inspect <Issue> - <Location>", ...] }
+ */
+async function aiRefineChecklist(sentences = [], hint = '') {
+  const list = (Array.isArray(sentences) ? sentences : []).slice(0, 120);
+  if (!list.length) return { description: '', checklist: [] };
+
+  const prompt = `
+Return ONLY minified JSON (no markdown):
+{"description":"","checklist":["Inspect <Issue> - <Location>"]}
+
+Rules:
+- Every checklist item MUST be "Inspect <Damage> - <Location>" (Title Case).
+- <Damage> must be one of: Dent | Scratch | Crack | Rust | Paint Peel | Hail Damage | Burn
+  (Map synonyms: scuff/scrape→Scratch, ding/dint→Dent, clear coat/peel→Paint Peel, cracked→Crack, corrosion→Rust, hail→Hail Damage, melt/heat damage→Burn)
+- <Location> short, human, Title Case (e.g., "Front Left Fender", "Rear Bumper Lower Left", "Engine Bay", "Underbody", "Driver Seat").
+- DEDUPE near-duplicates; pick the clearest phrasing. Max 50 items.
+- "description" is a short comma list of exterior colour(s) and accessories (Bullbar, Roof Racks, Snorkel) if implied. Keep generic.
+
+Findings:
+${list.map(x=>`- ${String(x)}`).join('\n')}
+${hint ? `\nHints: ${hint}\n` : ''}
+  `.trim();
+
+  const text = await geminiGenerate([{ text: prompt }], { temperature: 0.1 });
+  const obj = extractJson(text);
+  const out = {
+    description: String(obj.description || '').trim(),
+    checklist: Array.isArray(obj.checklist) ? obj.checklist.map(s=>String(s).trim()).filter(Boolean) : [],
+  };
+  return out;
+}
+
+module.exports = { aiRefineChecklist };

@@ -124,3 +124,5 @@ async function analyzeImageVehicle({ base64, mimeType }) {
 }
 
 module.exports = { chatJSON, imageToStatements, analyzeImageVehicle };
+module.exports = { geminiGenerate, chatJSON, imageToStatements, analyzeImageVehicle };
+

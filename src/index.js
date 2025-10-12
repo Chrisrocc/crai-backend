@@ -60,17 +60,20 @@ const corsConfig = {
   origin(origin, cb) {
     const ok = isAllowedOrigin(origin);
     if (!ok) console.warn(`[CORS] blocked origin: ${origin || "(none)"}`);
-    // Return ok=false instead of throwing so preflights still 204 cleanly
+    // return ok without throwing so the lib can set headers properly
     return cb(null, ok);
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  // IMPORTANT: let `cors` reflect request headers automatically.
+  // (Explicitly listing here can break preflight if the browser sends more.)
+  // allowedHeaders: undefined,
   optionsSuccessStatus: 204,
 };
 
-// One middleware handles both simple and preflight requests
 app.use(cors(corsConfig));
+// Express 5 path-to-regexp requires a leading slash. Use "/(.*)" (NOT "(.*)" or "*").
+app.options("/(.*)", cors(corsConfig));
 /* --------------------------------------------------------------- */
 
 // Body + cookies

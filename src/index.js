@@ -32,14 +32,11 @@ try {
 const app = express();
 const port = process.env.PORT || 5000;
 
-// Trust proxy so secure cookies work behind proxies (Railway/Render/CF)
+// Trust proxy so secure cookies work behind proxies (Railway/CF/Render)
 app.set("trust proxy", 1);
 
 /* --------------------------  C O R S  -------------------------- */
-// CF Pages production host (+ preview subdomains)
 const BASE_PAGES_HOST = "crai-frontend.pages.dev";
-
-// Optionally allow explicit origins via env (comma-separated)
 const FRONTEND_URLS = (process.env.FRONTEND_URL || "http://localhost:5173")
   .split(",")
   .map((s) => s.trim())
@@ -60,20 +57,21 @@ const corsConfig = {
   origin(origin, cb) {
     const ok = isAllowedOrigin(origin);
     if (!ok) console.warn(`[CORS] blocked origin: ${origin || "(none)"}`);
-    // return ok without throwing so the lib can set headers properly
     return cb(null, ok);
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  // IMPORTANT: let `cors` reflect request headers automatically.
-  // (Explicitly listing here can break preflight if the browser sends more.)
-  // allowedHeaders: undefined,
+  // Don't hardcode allowedHeaders; let cors reflect what the browser sends.
   optionsSuccessStatus: 204,
 };
 
 app.use(cors(corsConfig));
-// Express 5 path-to-regexp requires a leading slash. Use "/(.*)" (NOT "(.*)" or "*").
-app.options("/(.*)", cors(corsConfig));
+// 🚫 DO NOT use app.options('*') or '/(.*)' on Express 5 — it crashes.
+// ✅ Instead, finish any stray preflights here (cors above already set headers).
+app.use((req, res, next) => {
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
 /* --------------------------------------------------------------- */
 
 // Body + cookies
@@ -100,15 +98,13 @@ app.use("/api/auth", authRoutes);
 /* -------------------- TELEGRAM WEBHOOK (PUBLIC) -------------------- */
 const TG_WEBHOOK_PATH = "/telegram/webhook";
 const TG_WEBHOOK_DOMAIN = process.env.TELEGRAM_WEBHOOK_DOMAIN || ""; // e.g. crai-backend-production.up.railway.app
-let stopTelegram = null; // function to stop bot gracefully
+let stopTelegram = null;
 
 if (bot) {
   app.post(
     TG_WEBHOOK_PATH,
-    // Telegram sends no CORS and doesn't need cookies; just ensure JSON body is parsed
     express.json({ limit: "2mb" }),
     (req, res, next) => {
-      // If we're in polling mode, ignore webhook hits
       if (!bot?.webhookReply) return res.status(200).end();
       return require("./bots/telegram").bot.webhookCallback(TG_WEBHOOK_PATH)(
         req,
@@ -120,7 +116,7 @@ if (bot) {
 }
 // -------------------------------------------------------------------
 
-// --- PROTECTED ROUTES (mount guard per router) ---
+// --- PROTECTED ROUTES ---
 app.use("/api/cars", requireAuth, carsRouter);
 app.use("/api/customer-appointments", requireAuth, customerAppointmentsRouter);
 app.use("/api/reconditioner-categories", requireAuth, reconditionerCategoriesRouter);
@@ -149,7 +145,6 @@ async function start() {
     await mongoose.connect(process.env.MONGO_URI);
     console.log("Connected to MongoDB");
 
-    // Start HTTP server
     server = app.listen(port, () => {
       console.log(`Backend running on http://localhost:${port}`);
       console.log("CORS explicit FRONTEND_URLs:", FRONTEND_URLS);
@@ -158,15 +153,12 @@ async function start() {
       );
     });
 
-    // Start Telegram (choose webhook vs polling)
     if (bot) {
       if (TG_WEBHOOK_DOMAIN) {
-        const proto = "https";
-        const url = `${proto}://${TG_WEBHOOK_DOMAIN}${TG_WEBHOOK_PATH}`;
+        const url = `https://${TG_WEBHOOK_DOMAIN}${TG_WEBHOOK_PATH}`;
         try {
           await bot.telegram.setWebhook(url);
           console.log(`[telegram] webhook set: ${url}`);
-          // In webhook mode, Telegraf uses webhookCallback middleware (mounted above)
           stopTelegram = async () => {
             try {
               await bot.telegram.deleteWebhook();
@@ -176,10 +168,7 @@ async function start() {
             }
           };
         } catch (e) {
-          console.error(
-            "[telegram] setWebhook failed, falling back to polling:",
-            e.message
-          );
+          console.error("[telegram] setWebhook failed, falling back to polling:", e.message);
           await bot.launch();
           console.log("[telegram] launched in polling mode (fallback)");
           stopTelegram = async () => bot.stop("SIGTERM");
@@ -191,27 +180,12 @@ async function start() {
       }
     }
 
-    // graceful shutdown
     const shutdown = async (signal) => {
       console.log(`\nReceived ${signal}, shutting down...`);
-      try {
-        if (stopTelegram) await stopTelegram();
-      } catch (e) {
-        console.warn("Telegram stop error:", e.message);
-      }
-      try {
-        if (mongoose.connection.readyState) await mongoose.disconnect();
-      } catch (e) {
-        console.error("Mongo disconnect error:", e.message);
-      }
-      if (server) {
-        server.close(() => {
-          console.log("HTTP server closed.");
-          process.exit(0);
-        });
-      } else {
-        process.exit(0);
-      }
+      try { if (stopTelegram) await stopTelegram(); } catch (e) { console.warn("Telegram stop error:", e.message); }
+      try { if (mongoose.connection.readyState) await mongoose.disconnect(); } catch (e) { console.error("Mongo disconnect error:", e.message); }
+      if (server) server.close(() => { console.log("HTTP server closed."); process.exit(0); });
+      else process.exit(0);
     };
     process.on("SIGINT", () => shutdown("SIGINT"));
     process.on("SIGTERM", () => shutdown("SIGTERM"));

@@ -12,17 +12,28 @@ const {
   getSignedViewUrl,
   getPresignedPutUrl,
   deleteObject,
-} = require('../services/aws/s3'); // ✅ correct path
+} = require('../services/aws/s3');
 
-const {
-  analyzeAndEnrichByS3Key,
-} = require('../services/ai/visionEnrichment');
+const { analyzeAndEnrichByS3Key } = require('../services/ai/visionEnrichment');
 
 // Multer (optional server-side upload)
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB max
+  limits: { fileSize: 25 * 1024 * 1024 },
 });
+
+// Robust decode for query keys that may be double-encoded
+function robustDecode(val = '') {
+  let out = String(val || '');
+  try {
+    const once = decodeURIComponent(out);
+    // If after one decode we still see %xx, decode again
+    out = /%[0-9a-f]{2}/i.test(once) ? decodeURIComponent(once) : once;
+  } catch {
+    // ignore and use original
+  }
+  return out;
+}
 
 /* =========================================================
    GET: list signed view URLs for a car
@@ -100,13 +111,13 @@ router.post('/attach', async (req, res) => {
 
     const url = await getSignedViewUrl(key, 3600);
 
-    // Respond immediately so UI shows the photo
+    // Respond immediately so UI can render
     res.status(201).json({
       message: exists ? 'Photo already attached' : 'Photo attached',
       data: { key, caption, url },
     });
 
-    // Background: analyze & enrich (checklist + description)
+    // Background enrichment (tolerant)
     const tctx = timeline.newContext({ chatId: `upload:${carId}` });
     setImmediate(async () => {
       try {
@@ -156,7 +167,6 @@ router.post('/upload', upload.single('file'), async (req, res) => {
     const url = await getSignedViewUrl(key, 3600);
     res.status(201).json({ message: 'Photo uploaded and attached', data: { key, caption, url } });
 
-    // Background enrichment
     const tctx = timeline.newContext({ chatId: `upload:${car._id}` });
     setImmediate(async () => {
       try {
@@ -174,7 +184,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
 });
 
 /* =========================================================
-   PATCH: update a photo caption on a car
+   PATCH: update caption
    Body: { key: string, caption?: string }
    ========================================================= */
 router.patch('/:carId/caption', async (req, res) => {
@@ -203,12 +213,15 @@ router.patch('/:carId/caption', async (req, res) => {
    ========================================================= */
 router.delete('/:carId', async (req, res) => {
   try {
-    const { key } = req.query;
-    if (!key) return res.status(400).json({ message: 'key query param is required' });
+    const rawKey = req.query.key;
+    if (!rawKey) return res.status(400).json({ message: 'key query param is required' });
+
+    const key = robustDecode(rawKey);
 
     const car = await Car.findById(req.params.carId);
     if (!car) return res.status(404).json({ message: 'Car not found' });
 
+    // Tolerate missing objects (deleteObject will swallow NoSuchKey)
     await deleteObject(key);
 
     const before = (car.photos || []).length;

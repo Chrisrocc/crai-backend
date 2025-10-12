@@ -6,12 +6,11 @@ const {
   AWS_SECRET_ACCESS_KEY = '',
   AWS_REGION = '',
   AWS_BUCKET_NAME = '',
-  // Optional extras (safe to leave unset)
-  AWS_S3_ENDPOINT = '',              // e.g. https://s3.amazonaws.com or a MinIO/R2 endpoint
-  AWS_S3_FORCE_PATH_STYLE = '',      // 'true' to force path-style URLs if using custom endpoints
+  AWS_S3_ENDPOINT = '',
+  AWS_S3_FORCE_PATH_STYLE = '',
 } = process.env;
 
-// ---------- Diagnostics (one-time, safe) ----------
+// ---------- Diagnostics ----------
 const missing = [];
 if (!AWS_BUCKET_NAME) missing.push('AWS_BUCKET_NAME');
 if (!AWS_REGION) missing.push('AWS_REGION');
@@ -25,39 +24,29 @@ if (S3_DISABLED) {
     '→ Set these in Railway Variables to enable photo uploads.'
   );
 } else {
-  console.log('[S3] Enabled for bucket:', AWS_BUCKET_NAME, 'region:', AWS_REGION);
-  // Helpful for future debugging without revealing full secrets:
-  if (AWS_ACCESS_KEY_ID) console.log('[S3] Using static credentials (access key id length):', AWS_ACCESS_KEY_ID.length);
-  if (AWS_S3_ENDPOINT) console.log('[S3] Custom endpoint:', AWS_S3_ENDPOINT);
+    console.log('[S3] Enabled for bucket:', AWS_BUCKET_NAME, 'region:', AWS_REGION);
+    if (AWS_ACCESS_KEY_ID) console.log('[S3] Using static credentials (access key id length):', AWS_ACCESS_KEY_ID.length);
+    if (AWS_S3_ENDPOINT) console.log('[S3] Custom endpoint:', AWS_S3_ENDPOINT);
 }
 
-// ---------- Client creation (only if enabled) ----------
 let s3 = null;
 let BUCKET = AWS_BUCKET_NAME;
 
 if (!S3_DISABLED) {
   const { S3Client } = require('@aws-sdk/client-s3');
-
-  const clientConfig = {
-    region: AWS_REGION,
-  };
-
-  // Optional: static credentials (otherwise SDK will use env/role/instance creds)
+  const clientConfig = { region: AWS_REGION };
   if (AWS_ACCESS_KEY_ID && AWS_SECRET_ACCESS_KEY) {
     clientConfig.credentials = {
       accessKeyId: AWS_ACCESS_KEY_ID,
       secretAccessKey: AWS_SECRET_ACCESS_KEY,
     };
   }
-
-  // Optional: custom endpoint (MinIO/R2/etc.)
   if (AWS_S3_ENDPOINT) {
     clientConfig.endpoint = AWS_S3_ENDPOINT;
     if (String(AWS_S3_FORCE_PATH_STYLE).toLowerCase() === 'true') {
       clientConfig.forcePathStyle = true;
     }
   }
-
   s3 = new S3Client(clientConfig);
 }
 
@@ -71,12 +60,9 @@ function safeSlug(s) {
     .replace(/[^a-z0-9\-_.]/g, '')
     .slice(0, 80) || 'unknown';
 }
-
 function timeStamp() {
-  // e.g. 2025-08-28T05-12-31-123Z -> 2025-08-28T05-12-31-123Z (safe in key paths)
   return new Date().toISOString().replace(/[:.]/g, '-');
 }
-
 function requireEnabled() {
   if (S3_DISABLED) {
     const msg =
@@ -88,17 +74,14 @@ function requireEnabled() {
   }
 }
 
-/**
- * Build an S3 object key for a car photo.
- * Prefer carId if you have it; otherwise fall back to rego.
- */
+/** Build a stable S3 key for a car photo. */
 function makeCarPhotoKey({ carId, rego, filename }) {
   const base = carId ? `car-${safeSlug(carId)}` : `rego-${safeSlug(rego)}`;
   const name = filename ? safeSlug(path.basename(filename)) : `upload-${timeStamp()}.jpg`;
   return `cars/${base}/${timeStamp()}-${name}`;
 }
 
-// ---------- Public API (no-ops if disabled) ----------
+// ---------- Public API ----------
 async function uploadBufferToS3({ key, buffer, contentType = 'application/octet-stream', acl = undefined }) {
   requireEnabled();
   const { PutObjectCommand } = require('@aws-sdk/client-s3');
@@ -125,11 +108,7 @@ async function getPresignedPutUrl({ key, contentType = 'application/octet-stream
   requireEnabled();
   const { PutObjectCommand } = require('@aws-sdk/client-s3');
   const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
-  const cmd = new PutObjectCommand({
-    Bucket: BUCKET,
-    Key: key,
-    ContentType: contentType,
-  });
+  const cmd = new PutObjectCommand({ Bucket: BUCKET, Key: key, ContentType: contentType });
   const url = await getSignedUrl(s3, cmd, { expiresIn: expiresInSeconds });
   return { key, uploadUrl: url, expiresIn: expiresInSeconds };
 }
@@ -138,12 +117,21 @@ async function deleteObject(key) {
   requireEnabled();
   const { DeleteObjectCommand } = require('@aws-sdk/client-s3');
   const cmd = new DeleteObjectCommand({ Bucket: BUCKET, Key: key });
-  await s3.send(cmd);
+  try {
+    await s3.send(cmd);
+  } catch (e) {
+    // Tolerate "not found" deletes so API doesn't 500
+    const code = e?.name || e?.Code || e?.code || '';
+    if (String(code).toLowerCase().includes('nosuchkey')) {
+      console.warn('[S3] deleteObject: key did not exist, treating as deleted:', key);
+    } else {
+      throw e;
+    }
+  }
   return { key, deleted: true };
 }
 
 module.exports = {
-  // Expose for other modules/tests
   s3,
   BUCKET,
   S3_DISABLED,

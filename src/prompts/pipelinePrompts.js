@@ -1,3 +1,5 @@
+// src/prompts/pipelinePrompts.js
+
 // =======================
 // Step 1: Filter (expand bullets, attach photos, keep only actionable)
 // =======================
@@ -165,6 +167,7 @@ CANONICAL CATEGORIES:
 - READY
 - TASK
 - REPAIR
+- SOLD
 - OTHER
 - NEXT_LOCATION
 
@@ -177,6 +180,7 @@ Mapping from user ideas (for reference):
 - "To Do" → TASK
 - "Notes" → OTHER
 - "Car Repairs" → REPAIR
+- "Sold" → SOLD
 
 Triggers:
 - READY: a specific car is ready ("Hummer is ready"). Generic “X has nothing ready” → OTHER.
@@ -185,7 +189,6 @@ Triggers:
 - CUSTOMER_APPOINTMENT: when a customer is scheduled to view or pick up a particular car.
 - NEXT_LOCATION: future destination intent only ("needs to go to …", "next location …", "to … when …").
 - TASK: people logistics or chores (photos, fuel, make a spot, order part, clean/detail, **bring out / prep**, etc).
-- RECON_APPOINTMENT: service/repair/RWC booking/visit (who/what/when).
 - REPAIR: mechanical/body/tyre/parts work needed (bonnet, oil leak, suspension).
 - SOLD: car is sold.
 - OTHER: useful notes that aren’t actionable.
@@ -206,7 +209,6 @@ Christian Roccuzzo: 'Drop off Dmax to Capital.'
 OUTPUT
 DROP_OFF - Christian Roccuzzo: 'Drop off Dmax to Capital.'
 NEXT_LOCATION - Christian Roccuzzo: 'Drop off Dmax to Capital.'
-
 `;
 
 // Dynamic categorizer that promotes RECON when any user keyword appears
@@ -226,6 +228,7 @@ CANONICAL CATEGORIES:
 - READY
 - TASK
 - REPAIR
+- SOLD
 - OTHER
 - NEXT_LOCATION
 
@@ -400,14 +403,14 @@ module.exports = {
   FILTER_SYSTEM,
   REFINE_SYSTEM,
   CATEGORIZE_SYSTEM,
-  CATEGORIZE_SYSTEM_DYNAMIC,              // <— export dynamic categorizer
+  CATEGORIZE_SYSTEM_DYNAMIC,              // dynamic RECON promotion
   EXTRACT_LOCATION_UPDATE,
   EXTRACT_SOLD,
   EXTRACT_REPAIR,
   EXTRACT_READY,
   EXTRACT_DROP_OFF,
   EXTRACT_CUSTOMER_APPOINTMENT,
-  EXTRACT_RECON_APPOINTMENT_FROM_DB,      // <— DB-driven recon extractor
+  EXTRACT_RECON_APPOINTMENT_FROM_DB,
   EXTRACT_NEXT_LOCATION,
   EXTRACT_TASK,
 };

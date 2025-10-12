@@ -36,7 +36,10 @@ const port = process.env.PORT || 5000;
 app.set("trust proxy", 1);
 
 /* --------------------------  C O R S  -------------------------- */
+// Production CF Pages host (root + all preview subdomains)
 const BASE_PAGES_HOST = "crai-frontend.pages.dev";
+
+// Optionally allow explicit origins via env (comma-separated)
 const FRONTEND_URLS = (process.env.FRONTEND_URL || "http://localhost:5173")
   .split(",")
   .map((s) => s.trim())
@@ -55,17 +58,22 @@ function isAllowedOrigin(origin) {
   }
 }
 
-app.use(
-  cors({
-    origin(origin, cb) {
-      if (!origin) return cb(null, true); // curl/Postman/same-origin
-      if (isAllowedOrigin(origin)) return cb(null, true);
-      return cb(new Error(`CORS: Origin ${origin} not allowed`));
-    },
-    credentials: true,
-    optionsSuccessStatus: 204,
-  })
-);
+const corsConfig = {
+  origin(origin, cb) {
+    // allow curl/Postman/same-origin (no Origin header)
+    if (!origin) return cb(null, true);
+    if (isAllowedOrigin(origin)) return cb(null, true);
+    return cb(new Error(`CORS: Origin ${origin} not allowed`));
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsConfig));
+// Explicitly handle preflight for all routes (so it never hits auth)
+app.options("*", cors(corsConfig));
 /* --------------------------------------------------------------- */
 
 // Body + cookies
@@ -89,12 +97,7 @@ app.get("/ping", (_req, res) => res.json({ ok: true, t: Date.now() }));
 // --- PUBLIC AUTH ROUTES ---
 app.use("/api/auth", authRoutes);
 
-/* -------------------- TELEGRAM WEBHOOK (PUBLIC) --------------------
-   We support BOTH webhook and polling:
-   - If TELEGRAM_WEBHOOK_DOMAIN is set, we register a webhook at:
-       POST https://<domain>/telegram/webhook
-   - Otherwise we fall back to long polling.
-------------------------------------------------------------------- */
+/* -------------------- TELEGRAM WEBHOOK (PUBLIC) -------------------- */
 const TG_WEBHOOK_PATH = "/telegram/webhook";
 const TG_WEBHOOK_DOMAIN = process.env.TELEGRAM_WEBHOOK_DOMAIN || ""; // e.g. crai-backend-production.up.railway.app
 let stopTelegram = null; // function to stop bot gracefully
@@ -107,7 +110,11 @@ if (bot) {
     (req, res, next) => {
       // If we're in polling mode, ignore webhook hits
       if (!bot?.webhookReply) return res.status(200).end();
-      return require("./bots/telegram").bot.webhookCallback(TG_WEBHOOK_PATH)(req, res, next);
+      return require("./bots/telegram").bot.webhookCallback(TG_WEBHOOK_PATH)(
+        req,
+        res,
+        next
+      );
     }
   );
 }
@@ -146,7 +153,9 @@ async function start() {
     server = app.listen(port, () => {
       console.log(`Backend running on http://localhost:${port}`);
       console.log("CORS explicit FRONTEND_URLs:", FRONTEND_URLS);
-      console.log(`CORS Pages host allowed: ${BASE_PAGES_HOST} and all *.${BASE_PAGES_HOST}`);
+      console.log(
+        `CORS Pages host allowed: ${BASE_PAGES_HOST} and all *.${BASE_PAGES_HOST}`
+      );
     });
 
     // Start Telegram (choose webhook vs polling)
@@ -167,7 +176,10 @@ async function start() {
             }
           };
         } catch (e) {
-          console.error("[telegram] setWebhook failed, falling back to polling:", e.message);
+          console.error(
+            "[telegram] setWebhook failed, falling back to polling:",
+            e.message
+          );
           await bot.launch();
           console.log("[telegram] launched in polling mode (fallback)");
           stopTelegram = async () => bot.stop("SIGTERM");
@@ -210,4 +222,3 @@ async function start() {
 }
 
 start();
-

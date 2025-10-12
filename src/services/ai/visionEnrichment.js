@@ -1,9 +1,8 @@
-// src/services/ai/visionEnrichment.js
 require('dotenv').config();
 const path = require('path');
 const Car = require('../../models/Car');
 const audit = require('../logging/auditLogger');
-const { normalizeChecklist } = require('./checklistDeduper');
+const { normalizeChecklist, toInspectCanonical } = require('./checklistDeduper');
 const { aiDedupeAndFormat } = require('./checklistPostprocess');
 
 let getSignedViewUrl;
@@ -22,46 +21,16 @@ const MODEL_NAME = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const MAX_BYTES = 8 * 1024 * 1024;
 
 /* =========================
-   Description extraction (local, simple)
-   ========================= */
-const COLOUR_WORDS = [
-  'white','black','silver','grey','gray','blue','red','green',
-  'yellow','orange','gold','brown','beige','maroon','purple',
-];
-const FEATURE_KEYS = [
-  { key: 'bullbar', variants: ['bull bar', 'nudge bar'], label: 'Bullbar' },
-  { key: 'roof rack', variants: ['roof racks'], label: 'Roof Racks' },
-  { key: 'snorkel', variants: [], label: 'Snorkel' },
-];
-
-function titlecase(s){ return String(s||'').toLowerCase().replace(/\b\w/g,c=>c.toUpperCase()); }
-
-function extractColoursAndFeatures(roughLines = [], caption = '') {
-  const colours = new Set();
-  const features = new Set();
-  const haystack = [...(roughLines || []), caption].map(s => String(s||'').toLowerCase());
-
-  for (const line of haystack) {
-    for (const cw of COLOUR_WORDS) {
-      if (line.includes(cw)) colours.add(titlecase(cw));
-    }
-    for (const f of FEATURE_KEYS) {
-      if (line.includes(f.key) || f.variants.some(v => line.includes(v))) {
-        features.add(f.label);
-      }
-    }
-  }
-  return { colours: [...colours], features: [...features] };
-}
-
-/* =========================
    Helpers
    ========================= */
 // tolerant JSON parser: strips ```json fences and extracts first {...}
 function safeParse(text) {
   if (!text) return null;
   const s = String(text).trim();
-  const unfenced = s.replace(/^```(?:json)?\s*/i,'').replace(/```$/,'').trim();
+  const unfenced = s
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/```$/, '')
+    .trim();
   const m = unfenced.match(/\{[\s\S]*\}/);
   try { return JSON.parse(m ? m[0] : unfenced); } catch { return null; }
 }
@@ -86,20 +55,21 @@ function extractModelText(json) {
 }
 
 /* =========================
-   Gemini (REST v1): images -> rough lines
+   Gemini (REST v1)
    ========================= */
 async function callGemini({ bytes, mimeType, caption }) {
   if (!GOOGLE_API_KEY) return { sentences: [], _raw: '{}' };
 
   const url = `https://generativelanguage.googleapis.com/v1/models/${MODEL_NAME}:generateContent?key=${encodeURIComponent(GOOGLE_API_KEY)}`;
 
+  // First step: vision turns images into rough lines.
   const prompt = `
 Return ONLY MINIFIED JSON (no markdown, no extra fields) as:
 {"sentences":["...", "..."]}
 
 Goal: Convert the photo into a list of short, rough findings (one per line).
 Don't explain; just the array. The items can be rough like:
-"scratch front left fender", "dent rear bumper lower left", "bullbar", "white paint".
+"scratch front left fender", "dent rear bumper lower left", "inspect seat leather for scratch".
 Keep max 80 items and keep each item short.
 `.trim();
 
@@ -138,31 +108,25 @@ Keep max 80 items and keep each item short.
    Analyze raw bytes
    ========================= */
 async function analyzeWithGemini({ bytes, mimeType = 'image/jpeg', caption = '' }, tctx) {
-  if (!bytes?.length) return { features: [], colours: [], damages: [], inspect: [], notes: 'empty' };
-  if (bytes.length > MAX_BYTES) return { features: [], colours: [], damages: [], inspect: [], notes: 'too_big' };
+  if (!bytes?.length) return { inspect: [], notes: 'empty', features: [], colours: [], damages: [] };
+  if (bytes.length > MAX_BYTES) return { inspect: [], notes: 'too_big', features: [], colours: [], damages: [] };
 
   // 1) Vision → rough lines
   const res = await callGemini({ bytes, mimeType, caption });
   const rough = Array.isArray(res.sentences) ? res.sentences : [];
 
-  // 2) Build checklist via one AI post-process step
+  // 2) Post-process via single prompt to canonicalize & dedupe
   const cleaned = await aiDedupeAndFormat(rough);
-  const inspect = normalizeChecklist(cleaned); // idempotent guard
 
-  // 3) Local description extraction (colours + selected features)
-  const { colours, features } = extractColoursAndFeatures(rough, caption);
+  // 3) Final local guard (idempotent)
+  const inspect = normalizeChecklist(cleaned);
 
   audit.write(tctx, 'vision.response', {
-    summary: `vision->rough:${rough.length} postprocess->inspect:${inspect.length} colours:${colours.length} features:${features.length}`,
-    out: {
-      rough: rough.slice(0, 20),
-      inspect: inspect.slice(0, 20),
-      colours, features,
-      raw: (res._raw || '').slice(0, 2000)
-    },
+    summary: `vision->rough:${rough.length} postprocess->inspect:${inspect.length}`,
+    out: { rough: rough.slice(0, 20), inspect: inspect.slice(0, 20), raw: (res._raw || '').slice(0, 2000) },
   });
 
-  return { features, colours, damages: [], inspect, notes: '' };
+  return { features: [], colours: [], damages: [], inspect, notes: '' };
 }
 
 /* =========================
@@ -185,30 +149,17 @@ async function enrichCarWithFindings({ carId, features = [], colours = [], damag
   const car = await Car.findById(carId);
   if (!car) throw new Error('Car not found');
 
-  // Checklist (damage): merge + normalize + de-dupe
-  const mergedChecklist = [
+  const merged = [
     ...(Array.isArray(car.checklist) ? car.checklist : []),
     ...inspect,
   ];
-  car.checklist = normalizeChecklist(mergedChecklist);
 
-  // Description (colours + selected features): dedupe and keep concise
-  const allowedForDescription = new Set(['Bullbar', 'Roof Racks', 'Snorkel']);
-  const descSet = new Set(
-    String(car.description || '')
-      .split(',')
-      .map(s => s.trim())
-      .filter(Boolean)
-  );
-  colours.forEach(c => descSet.add(c));
-  features.forEach(f => { if (allowedForDescription.has(f)) descSet.add(f); });
-
-  car.description = [...descSet].join(', ');
+  car.checklist = normalizeChecklist(merged);
   await car.save();
 
   audit.write(tctx, 'vision.enrich', {
-    summary: `car:${car.rego} checklist:+${inspect.length} desc(+colours:${colours.length}, +features:${features.length})`,
-    out: { description: car.description, checklist: car.checklist },
+    summary: `car:${car.rego} inspect:${inspect.length}`,
+    out: { checklist: car.checklist },
   });
 
   return { car, features, colours, damages, inspect };

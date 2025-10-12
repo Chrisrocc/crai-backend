@@ -3,6 +3,9 @@ const jwt = require("jsonwebtoken");
 const COOKIE_NAME = "sid";
 
 module.exports = function requireAuth(req, res, next) {
+  // Allow CORS preflight without auth
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+
   try {
     const fromCookie = req.cookies?.[COOKIE_NAME];
     const auth = req.headers.authorization || "";

@@ -36,7 +36,7 @@ const port = process.env.PORT || 5000;
 app.set("trust proxy", 1);
 
 /* --------------------------  C O R S  -------------------------- */
-// Production CF Pages host (root + all preview subdomains)
+// CF Pages production host (+ preview subdomains)
 const BASE_PAGES_HOST = "crai-frontend.pages.dev";
 
 // Optionally allow explicit origins via env (comma-separated)
@@ -46,24 +46,24 @@ const FRONTEND_URLS = (process.env.FRONTEND_URL || "http://localhost:5173")
   .filter(Boolean);
 
 function isAllowedOrigin(origin) {
+  if (!origin) return true; // curl/Postman/same-origin
   try {
-    const u = new URL(origin);
-    const host = u.hostname;
-    if (host === BASE_PAGES_HOST) return true;
-    if (host.endsWith("." + BASE_PAGES_HOST)) return true; // preview subdomains
-    if (FRONTEND_URLS.includes(origin)) return true;
-    return false;
-  } catch {
-    return false;
-  }
+    const { hostname } = new URL(origin);
+    if (hostname === BASE_PAGES_HOST) return true;
+    if (hostname.endsWith("." + BASE_PAGES_HOST)) return true; // CF preview subdomains
+    if (FRONTEND_URLS.includes(origin)) return true; // explicit allow-list
+  } catch {}
+  return false;
 }
 
 const corsConfig = {
   origin(origin, cb) {
-    // allow curl/Postman/same-origin (no Origin header)
-    if (!origin) return cb(null, true);
-    if (isAllowedOrigin(origin)) return cb(null, true);
-    return cb(new Error(`CORS: Origin ${origin} not allowed`));
+    const ok = isAllowedOrigin(origin);
+    if (!ok) {
+      console.warn(`[CORS] blocked origin: ${origin || "(none)"}`);
+    }
+    // Don’t throw; return false so CORS just omits headers (preflights still 204)
+    return cb(null, ok);
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -72,7 +72,7 @@ const corsConfig = {
 };
 
 app.use(cors(corsConfig));
-// Explicitly handle preflight for all routes (so it never hits auth)
+// Express 5: avoid "*" (path-to-regexp crash). Use a catch-all pattern.
 app.options("(.*)", cors(corsConfig));
 /* --------------------------------------------------------------- */
 

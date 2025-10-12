@@ -73,7 +73,7 @@ const corsConfig = {
 
 app.use(cors(corsConfig));
 // Explicitly handle preflight for all routes (so it never hits auth)
-app.options("*", cors(corsConfig));
+app.options("(.*)", cors(corsConfig));
 /* --------------------------------------------------------------- */
 
 // Body + cookies

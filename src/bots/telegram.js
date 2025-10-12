@@ -25,12 +25,73 @@ if (!BOT_TOKEN) throw new Error('Missing TELEGRAM_BOT_TOKEN');
 
 const bot = new Telegraf(BOT_TOKEN);
 
-// ---- batcher (1-minute windows per chat) ----
+/* ------------------ Silence/notify controls ------------------
+   - TELEGRAM_SILENT_ALL_GROUPS=true  → never reply in groups/supergroups
+   - TELEGRAM_SILENT_GROUP_IDS="id1,id2" → silence only listed chat ids
+   - TELEGRAM_ADMIN_CHAT_ID=123456789 → forward notifications there instead
+---------------------------------------------------------------- */
+const SILENT_ALL_GROUPS = String(process.env.TELEGRAM_SILENT_ALL_GROUPS || 'true').toLowerCase() === 'true';
+const SILENT_GROUP_IDS = new Set(
+  (process.env.TELEGRAM_SILENT_GROUP_IDS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+);
+const ADMIN_CHAT_ID = process.env.TELEGRAM_ADMIN_CHAT_ID || '';
+
+function isGroupChatId(id) {
+  // Telegram group/supergroup/channel ids are negative numbers
+  // DMs (user chats) are positive.
+  const n = Number(id);
+  return Number.isFinite(n) && n < 0;
+}
+
+function shouldSilenceChat(chat) {
+  const id = chat?.id;
+  if (SILENT_GROUP_IDS.has(String(id))) return true;
+  if (SILENT_ALL_GROUPS && isGroupChatId(id)) return true;
+  return false;
+}
+
+async function safeReply(ctx, text, extra) {
+  try {
+    if (shouldSilenceChat(ctx.chat)) {
+      // Silent mode: optionally forward to admin instead
+      if (ADMIN_CHAT_ID) {
+        await bot.telegram.sendMessage(
+          ADMIN_CHAT_ID,
+          `[#${ctx.chat?.id}] ${text}`,
+          extra
+        );
+      }
+      return;
+    }
+    await ctx.reply(text, extra);
+  } catch (e) {
+    console.warn('[telegram] safeReply failed:', e.message);
+  }
+}
+
+async function notifyChatOrAdmin(chatId, text, extra) {
+  try {
+    const silent = SILENT_GROUP_IDS.has(String(chatId)) || (SILENT_ALL_GROUPS && isGroupChatId(chatId));
+    if (silent) {
+      if (ADMIN_CHAT_ID) {
+        await bot.telegram.sendMessage(ADMIN_CHAT_ID, `[#${chatId}] ${text}`, extra);
+      }
+      return;
+    }
+    await bot.telegram.sendMessage(chatId, text, extra);
+  } catch (e) {
+    console.warn('[telegram] notifyChatOrAdmin failed:', e.message);
+  }
+}
+
+/* ------------------- Batcher (1-minute windows) ------------------- */
 const batcher = new Batcher({
   windowMs: 60_000,
   onFlush: async (chatId, messages) => {
     const tctx = timeline.newContext({ chatId });
-
     const { actions } = await processBatch(messages, tctx);
 
     const out = [];
@@ -45,33 +106,26 @@ const batcher = new Batcher({
               : `ℹ️ ${r.car.rego} already at "${r.car.location}"`;
             break;
           }
-
           case 'SOLD': {
             const r = await applySold(a, tctx);
             msg = r.changed ? `✅ ${r.car.rego} marked Sold` : `ℹ️ ${r.car.rego} already Sold`;
             break;
           }
-
           case 'REPAIR': {
             const r = await addChecklistItem(a, tctx);
             msg = `🛠️ ${r.car.rego} checklist + ${r.item}`;
             break;
           }
-
           case 'READY': {
             const r = await setReadinessStatus(a, tctx);
             msg = `✅ ${r.car.rego} readiness → ${r.readiness}`;
             break;
           }
-
-          // Drop-offs are stored as tasks (always created, even if unidentified)
           case 'DROP_OFF': {
             const r = await createDropOffTask(a, tctx);
             msg = `📦 Task: ${r.task.task}`;
             break;
           }
-
-          // Customer appointments (supports carText fallback)
           case 'CUSTOMER_APPOINTMENT': {
             const r = await createCustomerAppointment(a, tctx);
             const label = r.car
@@ -81,35 +135,29 @@ const batcher = new Batcher({
             msg = `👤 Customer appt created for ${label}${when}`;
             break;
           }
-
-          // Reconditioner appointment (supports carText fallback + category/time)
           case 'RECON_APPOINTMENT': {
             const r = await createReconditionerAppointment(a, tctx);
-            const label = r.car ? (r.car.rego || `${r.car.make} ${r.car.model}`.trim()) : (r.carText || 'unidentified vehicle');
+            const label = r.car
+              ? (r.car.rego || `${r.car.make} ${r.car.model}`.trim())
+              : (r.carText || 'unidentified vehicle');
             const when = r.appointment?.dateTime ? ` @ ${r.appointment.dateTime}` : '';
             const cat = r.appointment?.category?.name ? ` • ${r.appointment.category.name}` : '';
             msg = `🔧 Recon appt created for ${label}${when} (${r.appointment.name}${cat})`;
             break;
           }
-
-          // NEXT_LOCATION appends to car.nextLocations list (with de-dupe)
           case 'NEXT_LOCATION': {
             const r = await setNextLocation(a, tctx);
             msg = `➡️ ${r.car.rego} next location updated`;
             break;
           }
-
-          // Generic tasks
           case 'TASK': {
             const r = await createGenericTask(a, tctx);
             msg = `📝 Task: ${r.task.task}`;
             break;
           }
-
           default:
             msg = `⚠️ Skipped: ${a.type}`;
         }
-
         out.push(msg);
       } catch (err) {
         timeline.identFail(tctx, { reason: err.message, rego: a.rego, make: a.make, model: a.model });
@@ -118,26 +166,24 @@ const batcher = new Batcher({
     }
 
     const header = `🧾 Processed ${messages.length} message(s) → ${actions.length} action(s)`;
-    await bot.telegram.sendMessage(
-      chatId,
-      [header, ...(out.length ? out : ['No actionable updates.'])].join('\n')
-    );
+    const body = [header, ...(out.length ? out : ['No actionable updates.'])].join('\n');
 
+    await notifyChatOrAdmin(chatId, body);
     timeline.print(tctx);
   },
 });
 
-// ---- helpers ----
+/* --------------------------- helpers --------------------------- */
 const senderName = (ctx) => {
   const u = ctx.from || {};
   return u.username || [u.first_name, u.last_name].filter(Boolean).join(' ') || 'Unknown';
 };
+
 const addToBatch = (ctx, text, key, tsOverride) => {
   const ts = tsOverride ?? (ctx.message?.date ? ctx.message.date * 1000 : Date.now());
   batcher.addMessage({ chatId: ctx.chat.id, speaker: senderName(ctx), text, key, ts });
 };
 
-// MIME sniffing
 function guessImageMime(buffer, filename = '') {
   const ext = filename.toLowerCase().split('.').pop();
   if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
@@ -149,7 +195,7 @@ function guessImageMime(buffer, filename = '') {
   return 'image/jpeg';
 }
 
-// minimal visibility (optional)
+/* ------------------------ minimal logging ------------------------ */
 bot.on('message', async (ctx, next) => {
   try {
     console.log('INCOMING → chat.id:', ctx.chat?.id, 'type:', ctx.updateType, 'text:', ctx.message?.text || ctx.message?.caption || '');
@@ -157,25 +203,25 @@ bot.on('message', async (ctx, next) => {
   return next();
 });
 
-bot.command('ping', (ctx) => ctx.reply('pong'));
-bot.command('id', (ctx) => ctx.reply(`chat.id: ${ctx.chat?.id}`));
+bot.command('ping', (ctx) => safeReply(ctx, 'pong'));
+bot.command('id',   (ctx) => safeReply(ctx, `chat.id: ${ctx.chat?.id}`));
 
-// TEXT
+/* ------------------------------ TEXT ------------------------------ */
 bot.on('text', async (ctx) => {
   const text = ctx.message?.text?.trim();
   if (!text) return;
   addToBatch(ctx, text, ctx.message.message_id);
-  await ctx.reply('📦 Added to 1-min batch…');
+  await safeReply(ctx, '📦 Added to 1-min batch…');
 });
 
-// PHOTO (insert photo analysis into batch line)
+/* ------------------------------ PHOTO ----------------------------- */
 bot.on('photo', async (ctx) => {
   const photos = ctx.message.photo || [];
-  if (!photos.length) return ctx.reply('⚠️ No photo sizes found.');
+  if (!photos.length) return safeReply(ctx, '⚠️ No photo sizes found.');
 
   const key = ctx.message.message_id;
   addToBatch(ctx, 'Photo', key);
-  await ctx.reply('🖼️ Photo received — analyzing…');
+  await safeReply(ctx, '🖼️ Photo received — analyzing…');
 
   try {
     const biggest = photos[photos.length - 1];
@@ -191,7 +237,7 @@ bot.on('photo', async (ctx) => {
 
     const veh = await analyzeImageVehicle({ base64, mimeType });
 
-    // ----- REGO RESOLVE + DIAGNOSTICS -----
+    // ----- Optional: rego resolution (silent reply) -----
     let correctedRego = veh.rego;
     let resolverNote = '';
 
@@ -216,24 +262,16 @@ bot.on('photo', async (ctx) => {
           }
         );
 
-        if (!rresp.ok) throw new Error(`resolve-rego ${rresp.status}`);
-        const rjson = await rresp.json();
-        const r = rjson?.data || {};
-        console.log('[RegoResolver]', JSON.stringify(r, null, 2));
-
-        const dist = r.distances
-          ? `lev=${r.distances.lev}, conf=${r.distances.confusion}, total=${r.distances.total}`
-          : '-';
-        const alts = (r.alts || []).map(a => `${a.rego}(t${a.total}/l${a.lev})`).join(', ') || 'none';
-        await ctx.reply(`🔎 RegoResolver → action=${r.action}; best=${r.best?.rego || 'none'}; dist:${dist}; alts:${alts}`);
-
-        if (r.action === 'auto-fix' && r.best?.rego) {
-          resolverNote = ` (corrected from ${veh.rego})`;
-          correctedRego = r.best.rego;
+        if (rresp.ok) {
+          const rjson = await rresp.json();
+          const r = rjson?.data || {};
+          if (r.action === 'auto-fix' && r.best?.rego) {
+            resolverNote = ` (corrected from ${veh.rego})`;
+            correctedRego = r.best.rego;
+          }
         }
       } catch (e) {
         console.error('rego resolve error', e);
-        await ctx.reply(`⚠️ RegoResolver failed: ${e.message}`);
       }
     }
 
@@ -252,10 +290,15 @@ bot.on('photo', async (ctx) => {
       addToBatch(ctx, cap, `${key}:caption`, baseTs + 1);
     }
 
-    await ctx.reply(ok ? `✅ Added to batch: ${analysis}${cap ? `\n📝 Caption: ${cap}` : ''}` : `ℹ️ Analysis ready, but batch already flushed.`);
+    await safeReply(
+      ctx,
+      ok
+        ? `✅ Added to batch: ${analysis}${cap ? `\n📝 Caption: ${cap}` : ''}`
+        : `ℹ️ Analysis ready, but batch already flushed.`
+    );
   } catch (err) {
     console.error('photo handler error:', err);
-    await ctx.reply(`❌ Photo analysis failed: ${err.message || 'unknown error'}`);
+    await safeReply(ctx, `❌ Photo analysis failed: ${err.message || 'unknown error'}`);
   }
 });
 

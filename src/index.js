@@ -59,10 +59,8 @@ function isAllowedOrigin(origin) {
 const corsConfig = {
   origin(origin, cb) {
     const ok = isAllowedOrigin(origin);
-    if (!ok) {
-      console.warn(`[CORS] blocked origin: ${origin || "(none)"}`);
-    }
-    // Don’t throw; return false so CORS just omits headers (preflights still 204)
+    if (!ok) console.warn(`[CORS] blocked origin: ${origin || "(none)"}`);
+    // Return ok=false instead of throwing so preflights still 204 cleanly
     return cb(null, ok);
   },
   credentials: true,
@@ -71,9 +69,8 @@ const corsConfig = {
   optionsSuccessStatus: 204,
 };
 
+// One middleware handles both simple and preflight requests
 app.use(cors(corsConfig));
-// Express 5: avoid "*" (path-to-regexp crash). Use a catch-all pattern.
-app.options("(.*)", cors(corsConfig));
 /* --------------------------------------------------------------- */
 
 // Body + cookies

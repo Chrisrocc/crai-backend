@@ -1,4 +1,3 @@
-// src/index.js
 require("dotenv").config();
 
 const express = require("express");
@@ -20,6 +19,9 @@ const autogateSyncRoutes = require("./routes/autogateSync");
 // Auth
 const authRoutes = require("./routes/auth");
 const requireAuth = require("./middleware/requireAuth");
+
+// Public controller for rego resolution (no auth)
+const { resolveRegoController } = require("./routes/cars");
 
 // Telegram (do NOT launch here; we decide polling vs webhook below)
 let bot = null;
@@ -61,13 +63,10 @@ const corsConfig = {
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  // Don't hardcode allowedHeaders; let cors reflect what the browser sends.
   optionsSuccessStatus: 204,
 };
 
 app.use(cors(corsConfig));
-// 🚫 DO NOT use app.options('*') or '/(.*)' on Express 5 — it crashes.
-// ✅ Instead, finish any stray preflights here (cors above already set headers).
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
@@ -115,6 +114,14 @@ if (bot) {
   );
 }
 // -------------------------------------------------------------------
+
+/* ------------------- PUBLIC: resolve-rego route ------------------- */
+/**
+ * NOTE: This must come BEFORE the auth-protected /api/cars routes,
+ * otherwise the bot (no cookies) will get 401.
+ */
+app.post("/api/cars/resolve-rego", resolveRegoController);
+/* ------------------------------------------------------------------ */
 
 // --- PROTECTED ROUTES ---
 app.use("/api/cars", requireAuth, carsRouter);

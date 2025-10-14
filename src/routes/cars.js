@@ -12,12 +12,8 @@ const normalizeRego = (s) =>
   typeof s === 'string' ? s.toUpperCase().replace(/[^A-Z0-9]/g, '') : s;
 
 const toCsvArray = (val) => {
-  if (Array.isArray(val)) {
-    return [...new Set(val.map((s) => String(s).trim()).filter(Boolean))];
-  }
-  if (typeof val === 'string') {
-    return [...new Set(val.split(',').map((s) => s.trim()).filter(Boolean))];
-  }
+  if (Array.isArray(val)) return [...new Set(val.map((s) => String(s).trim()).filter(Boolean))];
+  if (typeof val === 'string') return [...new Set(val.split(',').map((s) => s.trim()).filter(Boolean))];
   return [];
 };
 
@@ -29,11 +25,8 @@ const dedupePush = (arr, value) => {
   return arr;
 };
 
-// canonicalize lists and strip the current location from next locations
 const normalizeList = (arr) =>
-  [...new Set((Array.isArray(arr) ? arr : [])
-    .map((s) => String(s).trim())
-    .filter(Boolean))];
+  [...new Set((Array.isArray(arr) ? arr : []).map((s) => String(s).trim()).filter(Boolean))];
 
 const stripCurrentFromNext = (nextArr, currentLoc) => {
   const next = normalizeList(nextArr);
@@ -55,60 +48,6 @@ const daysClosed = (start, end) => {
   const diff = Math.max(0, e - s);
   return Math.max(1, Math.floor(diff / msPerDay));
 };
-
-// ------- fuzzy helpers for OCR resolve -------
-const lookAlikeMap = new Map(Object.entries({
-  '0':'O','O':'0',
-  '1':'I','I':'1','L':'1',
-  '2':'Z','Z':'2',
-  '5':'S','S':'5',
-  '6':'G','G':'6',
-  '8':'B','B':'8',
-  '4':'A','A':'4',
-  'V':'U','U':'V',
-  'C':'G','G':'C',
-  'K':'X','X':'K',
-}));
-
-function charConf(a, b) {
-  if (a === b) return 1.0;
-  return lookAlikeMap.get(a) === b ? 0.5 : 0.0;
-}
-
-function levenshtein(a = '', b = '') {
-  const m = a.length, n = b.length;
-  if (m === 0) return n;
-  if (n === 0) return m;
-  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
-  for (let i = 0; i <= m; i++) dp[i][0] = i;
-  for (let j = 0; j <= n; j++) dp[0][j] = j;
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      dp[i][j] = Math.min(
-        dp[i - 1][j] + 1,
-        dp[i][j - 1] + 1,
-        dp[i - 1][j - 1] + cost
-      );
-    }
-  }
-  return dp[m][n];
-}
-
-function perCharConfidence(ocr, cand) {
-  const A = (ocr || '').toUpperCase();
-  const B = (cand || '').toUpperCase();
-  const len = Math.max(A.length, B.length);
-  if (!len) return 0;
-  let sum = 0;
-  for (let i = 0; i < len; i++) {
-    const ca = A[i] || '';
-    const cb = B[i] || '';
-    if (!ca || !cb) continue;
-    sum += charConf(ca, cb);
-  }
-  return sum / len;
-}
 
 // compute which checklist items are newly added (after normalization)
 function diffNewChecklistItems(oldList, newList) {
@@ -143,12 +82,11 @@ router.post('/', async (req, res) => {
       model: body.model?.trim() || '',
       badge: body.badge?.trim() || '',
       series: body.series?.trim() || '',
-      year:
-        typeof body.year === 'number'
-          ? body.year
-          : (String(body.year || '').trim() ? Number(body.year) : undefined),
+      year: typeof body.year === 'number'
+        ? body.year
+        : (String(body.year || '').trim() ? Number(body.year) : undefined),
       description: body.description?.trim() || '',
-      checklist: normalizeChecklist(toCsvArray(body.checklist || [])), // ⬅ normalize+dedupe NOW
+      checklist: normalizeChecklist(toCsvArray(body.checklist || [])),
       location: body.location?.trim() || '',
       nextLocations: [],
       readinessStatus: body.readinessStatus?.trim() || '',
@@ -172,11 +110,9 @@ router.post('/', async (req, res) => {
       payload.nextLocations = [...new Set(body.nextLocations.map((s) => String(s).trim()).filter(Boolean))];
     }
 
-    // ensure current location isn’t in nextLocations
     payload.nextLocations = stripCurrentFromNext(payload.nextLocations, payload.location);
 
     const doc = new Car(payload);
-    // Final guard: keep checklist normalized
     doc.checklist = normalizeChecklist(doc.checklist);
     await doc.save();
 
@@ -197,10 +133,8 @@ router.put('/:id', async (req, res) => {
     const doc = await Car.findById(id);
     if (!doc) return res.status(404).json({ message: 'Car not found' });
 
-    // snapshot (normalized) before
     const beforeChecklist = normalizeChecklist(doc.checklist || []);
 
-    // Scalars
     if (body.rego !== undefined) doc.rego = normalizeRego(body.rego || '');
     if (body.make !== undefined) doc.make = String(body.make || '').trim();
     if (body.model !== undefined) doc.model = String(body.model || '').trim();
@@ -215,11 +149,9 @@ router.put('/:id', async (req, res) => {
     if (body.description !== undefined) doc.description = String(body.description || '').trim();
 
     if (body.checklist !== undefined) {
-      // accept CSV or array → normalize into our strict "Inspect X - Y" + de-dupe
       doc.checklist = normalizeChecklist(toCsvArray(body.checklist));
     }
 
-    // nextLocations
     if (Array.isArray(body.nextLocations)) {
       doc.nextLocations = [...new Set(body.nextLocations.map((s) => String(s).trim()).filter(Boolean))];
     } else if (typeof body.nextLocation === 'string' && body.nextLocation.trim()) {
@@ -230,14 +162,12 @@ router.put('/:id', async (req, res) => {
     if (body.stage !== undefined) doc.stage = String(body.stage || '').trim();
     if (body.notes !== undefined) doc.notes = String(body.notes || '').trim();
 
-    // strip current from next (use incoming location if present)
     {
       const incomingLoc =
         body.location !== undefined ? String(body.location || '').trim() : (doc.location || '');
       doc.nextLocations = stripCurrentFromNext(doc.nextLocations, incomingLoc);
     }
 
-    // Location + History logic
     if (body.location !== undefined) {
       const newLoc = String(body.location || '').trim();
       const prevLoc = doc.location || '';
@@ -281,16 +211,12 @@ router.put('/:id', async (req, res) => {
         doc.location = '';
       }
 
-      // guarantee current location is not present in nextLocations
       doc.nextLocations = stripCurrentFromNext(doc.nextLocations, doc.location);
     }
 
-    // Final guard before save: normalize current checklist (even if not in body)
     doc.checklist = normalizeChecklist(doc.checklist || []);
-
     await doc.save();
 
-    // ingest newly-added normalized items → recon
     try {
       const afterChecklist = normalizeChecklist(doc.checklist || []);
       const newlyAdded = diffNewChecklistItems(beforeChecklist, afterChecklist);
@@ -305,7 +231,6 @@ router.put('/:id', async (req, res) => {
           try {
             console.log(`- checklist item added : ${label} — "${trimmed}"`);
 
-            // AI category decision (with safe fallback)
             let decided = { categoryName: 'Other', service: '' };
             try {
               decided = await decideCategoryForChecklist(trimmed, null);
@@ -314,7 +239,6 @@ router.put('/:id', async (req, res) => {
             }
             console.log(`- AI analysis: ${decided.categoryName || 'Other'} (service: ${decided.service || '-'})`);
 
-            // Upsert recon (create or append)
             const result = await upsertReconFromChecklist(
               { carId: doc._id, categoryName: decided.categoryName, noteText: trimmed, service: decided.service },
               null
@@ -346,19 +270,14 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-// ---------- DELETE /api/cars/:id ----------
-router.delete('/:id', async (req, res) => {
-  try {
-    const deleted = await Car.findByIdAndDelete(req.params.id);
-    if (!deleted) return res.status(404).json({ message: 'Car not found' });
-    res.json({ message: 'Car deleted successfully', data: deleted.toJSON() });
-  } catch (err) {
-    res.status(500).json({ message: 'Error deleting car', error: err.message });
-  }
-});
+// -------------- PUBLIC CONTROLLER: /api/cars/resolve-rego --------------
+/**
+ * Exported so index.js can mount it BEFORE auth.
+ * (Do not re-attach it to `router` here, to avoid double-mounting.)
+ */
+const audit = require('../services/logging/auditLogger');
 
-// ---------- POST /api/cars/resolve-rego ----------
-router.post('/resolve-rego', async (req, res) => {
+async function resolveRegoController(req, res) {
   try {
     const {
       regoOCR = '',
@@ -369,135 +288,98 @@ router.post('/resolve-rego', async (req, res) => {
       year = '',
       description = '',
       ocrConfidence = 0.9,
-      apply = false,
-      createIfMissing = true,
+      apply = true,               // bot wants to apply by default
+      createIfMissing = false,    // public path: do not create on reject by default
     } = req.body || {};
 
     const makeT = String(make || '').trim();
     const modelT = String(model || '').trim();
     const regoT = normalizeRego(regoOCR || '');
 
+    const actx = audit.newContext({ chatId: req.header('X-Chat-Id') || null });
+    audit.write(actx, 'rego.resolve.in', {
+      summary: `ocr:${regoT || '-'} ${makeT} ${modelT} ${color} conf:${ocrConfidence} apply:${apply}`,
+      body: req.body,
+    });
+
     if (!makeT || !modelT) {
-      return res.status(400).json({ message: 'make and model are required' });
+      audit.write(actx, 'rego.resolve.error', { summary: 'make+model missing' });
+      return res.status(400).json({ ok: false, error: 'make and model are required' });
     }
     if (!regoT || !/^[A-Z0-9]+$/.test(regoT)) {
-      return res.status(400).json({ message: 'regoOCR must contain letters/numbers only' });
+      audit.write(actx, 'rego.resolve.error', { summary: 'invalid regoOCR' });
+      return res.status(400).json({ ok: false, error: 'regoOCR must be alphanumeric' });
     }
 
+    // candidates by make+model
     const candidates = await Car.find({
       make: new RegExp(`^${makeT}$`, 'i'),
       model: new RegExp(`^${modelT}$`, 'i'),
+    }).lean();
+
+    audit.write(actx, 'rego.resolve.candidates', {
+      summary: `candidates:${candidates.length}`,
+      regs: candidates.map(c => c.rego),
     });
 
     if (!candidates.length) {
-      if (!createIfMissing) {
-        return res.json({ message: 'No candidates', data: { action: 'reject', best: null } });
-      }
-      const existing = await Car.findOne({ rego: new RegExp(`^${regoT}$`, 'i') });
-      if (existing) {
-        return res.json({ message: 'Rego already exists', data: { action: 'exact', best: { rego: existing.rego }, car: existing.toJSON() } });
-      }
-
-      const desc = [description, color].filter(Boolean).join(' ').trim();
-      const doc = new Car({
-        rego: regoT,
-        make: makeT,
-        model: modelT,
-        badge: String(badge || '').trim(),
-        year: String(year || '').trim() ? Number(year) : undefined,
-        description: desc,
-        stage: 'In Works',
-        checklist: [],
-        location: '',
-        nextLocations: [],
-        history: [],
-      });
-      await doc.save();
-
-      return res.status(201).json({
-        message: 'No match; created new car',
-        data: { action: 'created', best: null, car: doc.toJSON() },
-      });
+      audit.write(actx, 'rego.resolve.decision', { summary: 'reject: no candidates' });
+      return res.json({ ok: true, data: { action: 'reject', best: null } });
     }
 
-    const scored = candidates.map((c) => {
-      const lev = levenshtein(regoT, (c.rego || '').toUpperCase());
-      const conf = perCharConfidence(regoT, c.rego || '');
-      const total = lev - conf * Math.max(1, regoT.length) - ocrConfidence * 0.2;
-      return { car: c, lev, conf, total };
-    }).sort((a, b) => a.total - b.total);
+    // scoring: use weighted edit distance from your matching module
+    const { weightedEditDistance } = require('../services/matching/regoMatcher');
+    const scored = candidates
+      .map(c => ({
+        car: c,
+        rego: c.rego,
+        score: weightedEditDistance(regoT, c.rego),
+      }))
+      .sort((a, b) => a.score - b.score);
 
     const best = scored[0];
     const second = scored[1];
 
-    if (best && best.lev === 0) {
-      return res.json({
-        message: 'Exact rego',
-        data: { action: 'exact', best: { rego: best.car.rego }, scored: scored.slice(0, 3).map(s => ({ rego: s.car.rego, lev: s.lev, conf: s.conf, total: s.total })) },
-      });
+    audit.write(actx, 'rego.resolve.scored', {
+      summary: `best:${best?.rego || '-'} score:${best?.score ?? '-'}`,
+      list: scored.slice(0, 10).map(s => ({ rego: s.rego, score: s.score })),
+    });
+
+    // decisions (mirror your DEFAULT_POLICY-ish)
+    const autoFixThreshold = 0.6;
+    const reviewThreshold  = 1.2;
+    const uniqueMargin     = 0.2;
+
+    if (best && best.score === 0) {
+      audit.write(actx, 'rego.resolve.decision', { summary: `exact ${best.rego}` });
+      return res.json({ ok: true, data: { action: 'exact', best: { rego: best.rego } } });
     }
 
-    const AUTO_FIX_TOTAL = 1.2;
-    const REVIEW_TOTAL = 2.0;
-    const margin = second ? (second.total - best.total) : 99;
-
-    if (best && best.total <= AUTO_FIX_TOTAL && margin >= 0.8) {
-      if (apply) {
-        return res.json({
-          message: 'Auto-fix match',
-          data: { action: 'auto-fix', best: { rego: best.car.rego, id: String(best.car._id) } },
-        });
-      }
-      return res.json({
-        message: 'Would auto-fix',
-        data: { action: 'review', best: { rego: best.car.rego, id: String(best.car._id) } },
-      });
+    if (!best) {
+      audit.write(actx, 'rego.resolve.decision', { summary: 'reject: no best' });
+      return res.json({ ok: true, data: { action: 'reject', best: null } });
     }
 
-    if (best && best.total <= REVIEW_TOTAL) {
-      return res.json({
-        message: 'Needs review',
-        data: {
-          action: 'review',
-          best: { rego: best.car.rego, id: String(best.car._id) },
-          scored: scored.slice(0, 3).map(s => ({ rego: s.car.rego, lev: s.lev, conf: s.conf, total: s.total })),
-        },
-      });
+    const secondScore = second ? second.score : Infinity;
+    const unique = (secondScore - best.score) >= uniqueMargin;
+
+    if (best.score <= autoFixThreshold && unique) {
+      audit.write(actx, 'rego.resolve.apply', { summary: `auto-fix ${best.rego} (from ${regoT})` });
+      return res.json({ ok: true, data: { action: 'auto-fix', best: { rego: best.rego, id: String(best.car._id) } } });
     }
 
-    if (createIfMissing) {
-      const existing = await Car.findOne({ rego: new RegExp(`^${regoT}$`, 'i') });
-      if (existing) {
-        return res.json({ message: 'Rego exists elsewhere', data: { action: 'exact', best: { rego: existing.rego }, car: existing.toJSON() } });
-      }
-
-      const desc = [description, color].filter(Boolean).join(' ').trim();
-      const doc = new Car({
-        rego: regoT,
-        make: makeT,
-        model: modelT,
-        badge: String(badge || '').trim(),
-        year: String(year || '').trim() ? Number(year) : undefined,
-        description: desc,
-        stage: 'In Works',
-        checklist: [],
-        location: '',
-        nextLocations: [],
-        history: [],
-      });
-      await doc.save();
-
-      return res.status(201).json({
-        message: 'Rejected match; created new car',
-        data: { action: 'created', best: null, car: doc.toJSON() },
-      });
+    if (best.score <= reviewThreshold) {
+      audit.write(actx, 'rego.resolve.decision', { summary: `review ${best.rego}` });
+      return res.json({ ok: true, data: { action: 'review', best: { rego: best.rego, id: String(best.car._id) } } });
     }
 
-    return res.json({ message: 'No confident match', data: { action: 'reject', best: null } });
+    audit.write(actx, 'rego.resolve.decision', { summary: 'reject: over threshold' });
+    return res.json({ ok: true, data: { action: 'reject', best: null } });
   } catch (err) {
     console.error('resolve-rego error:', err);
-    res.status(400).json({ message: 'resolve-rego failed', error: err.message });
+    return res.status(500).json({ ok: false, error: err.message || 'resolver-failed' });
   }
-});
+}
 
 module.exports = router;
+module.exports.resolveRegoController = resolveRegoController;

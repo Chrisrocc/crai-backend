@@ -1,4 +1,3 @@
-// src/bots/telegram.js
 require('dotenv').config();
 const { Telegraf } = require('telegraf');
 
@@ -25,11 +24,7 @@ if (!BOT_TOKEN) throw new Error('Missing TELEGRAM_BOT_TOKEN');
 
 const bot = new Telegraf(BOT_TOKEN);
 
-/* ------------------ Silence/notify controls ------------------
-   - TELEGRAM_SILENT_ALL_GROUPS=true  → never reply in groups/supergroups
-   - TELEGRAM_SILENT_GROUP_IDS="id1,id2" → silence only listed chat ids
-   - TELEGRAM_ADMIN_CHAT_ID=123456789 → forward notifications there instead
----------------------------------------------------------------- */
+/* ------------------ Silence/notify controls ------------------ */
 const SILENT_ALL_GROUPS = String(process.env.TELEGRAM_SILENT_ALL_GROUPS || 'true').toLowerCase() === 'true';
 const SILENT_GROUP_IDS = new Set(
   (process.env.TELEGRAM_SILENT_GROUP_IDS || '')
@@ -40,8 +35,6 @@ const SILENT_GROUP_IDS = new Set(
 const ADMIN_CHAT_ID = process.env.TELEGRAM_ADMIN_CHAT_ID || '';
 
 function isGroupChatId(id) {
-  // Telegram group/supergroup/channel ids are negative numbers
-  // DMs (user chats) are positive.
   const n = Number(id);
   return Number.isFinite(n) && n < 0;
 }
@@ -56,13 +49,8 @@ function shouldSilenceChat(chat) {
 async function safeReply(ctx, text, extra) {
   try {
     if (shouldSilenceChat(ctx.chat)) {
-      // Silent mode: optionally forward to admin instead
       if (ADMIN_CHAT_ID) {
-        await bot.telegram.sendMessage(
-          ADMIN_CHAT_ID,
-          `[#${ctx.chat?.id}] ${text}`,
-          extra
-        );
+        await bot.telegram.sendMessage(ADMIN_CHAT_ID, `[#${ctx.chat?.id}] ${text}`, extra);
       }
       return;
     }
@@ -195,6 +183,11 @@ function guessImageMime(buffer, filename = '') {
   return 'image/jpeg';
 }
 
+function backendBase() {
+  const raw = process.env.BACKEND_URL || 'http://localhost:5000';
+  return raw.endsWith('/') ? raw.slice(0, -1) : raw;
+}
+
 /* ------------------------ minimal logging ------------------------ */
 bot.on('message', async (ctx, next) => {
   try {
@@ -237,41 +230,43 @@ bot.on('photo', async (ctx) => {
 
     const veh = await analyzeImageVehicle({ base64, mimeType });
 
-    // ----- Optional: rego resolution (silent reply) -----
+    // ----- Rego resolution with explicit logging -----
     let correctedRego = veh.rego;
     let resolverNote = '';
 
     if (veh.rego && veh.make && veh.model) {
       try {
-        const rresp = await fetch(
-          `${process.env.BACKEND_URL || 'http://localhost:5000'}/api/cars/resolve-rego`,
-          {
-            method: 'POST',
-            headers: {
-              'content-type': 'application/json',
-              'X-Chat-Id': String(ctx.chat.id),
-            },
-            body: JSON.stringify({
-              regoOCR: veh.rego,
-              make: veh.make,
-              model: veh.model,
-              color: veh.color,
-              ocrConfidence: veh.confidence || 0.9,
-              apply: true,
-            }),
-          }
-        );
+        const url = `${backendBase()}/api/cars/resolve-rego`;
+        const rresp = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'X-Chat-Id': String(ctx.chat.id),
+          },
+          body: JSON.stringify({
+            regoOCR: veh.rego,
+            make: veh.make,
+            model: veh.model,
+            color: veh.color,
+            ocrConfidence: veh.confidence || 0.9,
+            apply: true,
+          }),
+        });
 
-        if (rresp.ok) {
-          const rjson = await rresp.json();
+        if (!rresp.ok) {
+          const t = await rresp.text().catch(() => '');
+          console.warn('[telegram/photo] resolve-rego non-200:', rresp.status, t?.slice(0, 400));
+        } else {
+          const rjson = await rresp.json().catch(() => ({}));
           const r = rjson?.data || {};
+          console.log('[telegram/photo] resolve-rego decision:', r.action, 'best:', r.best?.rego);
           if (r.action === 'auto-fix' && r.best?.rego) {
             resolverNote = ` (corrected from ${veh.rego})`;
             correctedRego = r.best.rego;
           }
         }
       } catch (e) {
-        console.error('rego resolve error', e);
+        console.error('[telegram/photo] resolve-rego error:', e);
       }
     }
 

@@ -2,6 +2,7 @@
 const Car = require('../../models/Car');
 
 // ---------- shared helpers ----------
+const normalize = (s) => String(s || '').trim();
 const normalizeRego = (s) =>
   typeof s === 'string' ? s.toUpperCase().replace(/[^A-Z0-9]/g, '') : s;
 
@@ -15,30 +16,88 @@ const daysClosed = (start, end) => {
   const s = dateOnly(start).getTime();
   const e = dateOnly(end).getTime();
   const diff = Math.max(0, e - s);
-  return Math.max(1, Math.floor(diff / (1000 * 60 * 60 * 24)));
+  return Math.max(1, Math.floor(diff / msPerDay));
 };
 
-const findCarByAction = async (a) => {
-  // First by rego
+// Create a minimal car if we can (rego+make+model required)
+async function maybeCreateMinimalCarFromAction(a) {
+  const rego = normalizeRego(a.rego || '');
+  const make = normalize(a.make || '');
+  const model = normalize(a.model || '');
+
+  if (!rego || !make || !model) return null;
+
+  // If another car already has this rego (case-insensitive), return that instead
+  const existingByRego = await Car.findOne({ rego: new RegExp(`^${rego}$`, 'i') });
+  if (existingByRego) return existingByRego;
+
+  const doc = new Car({
+    rego,
+    make,
+    model,
+    badge: normalize(a.badge || ''),
+    series: '',
+    year: String(a.year || '').trim() ? Number(a.year) : undefined,
+    description: normalize(a.description || ''),
+    checklist: [],
+    location: '',
+    nextLocations: [],
+    history: [],
+    readinessStatus: '',
+    stage: 'In Works',
+    notes: '',
+  });
+
+  try {
+    await doc.save();
+    return doc;
+  } catch (e) {
+    // If unique index lost the race, fetch and return
+    if (e && e.code === 11000) {
+      const fallback = await Car.findOne({ rego: new RegExp(`^${rego}$`, 'i') });
+      if (fallback) return fallback;
+    }
+    throw e;
+  }
+}
+
+async function findCarByAction(a) {
+  // First by rego (normalized exact)
   if (a.rego) {
-    const car = await Car.findOne({ rego: normalizeRego(a.rego) });
-    if (car) return car;
+    const byRego = await Car.findOne({ rego: normalizeRego(a.rego) });
+    if (byRego) return byRego;
   }
   // Then by make+model (case-insensitive)
   if (a.make && a.model) {
-    const car = await Car.findOne({
+    const byBoth = await Car.findOne({
       make: new RegExp(`^${a.make}$`, 'i'),
       model: new RegExp(`^${a.model}$`, 'i'),
     });
-    if (car) return car;
+    if (byBoth) return byBoth;
   }
   // Then by model only (rare fallback)
   if (a.model) {
-    const car = await Car.findOne({ model: new RegExp(`^${a.model}$`, 'i') });
-    if (car) return car;
+    const byModel = await Car.findOne({ model: new RegExp(`^${a.model}$`, 'i') });
+    if (byModel) return byModel;
   }
+  return null;
+}
+
+/**
+ * Ensure a car exists for this action:
+ * - Try to find by rego / make+model / model.
+ * - If still missing and we have rego+make+model, create a minimal car (no location).
+ * - Otherwise throw (we can’t safely create).
+ */
+async function ensureCarForAction(a) {
+  const found = await findCarByAction(a);
+  if (found) return found;
+
+  const created = await maybeCreateMinimalCarFromAction(a);
+  if (created) return created;
+
   throw new Error('No cars match specified make+model.');
-};
+}
 
 // append unique next location
 const pushNextLocation = (car, v) => {
@@ -97,7 +156,7 @@ const updateLocationWithHistory = (car, newLoc) => {
 
 // ---------- exported updaters used by telegram.js ----------
 async function applyLocationUpdate(a /*, tctx */) {
-  const car = await findCarByAction(a);
+  const car = await ensureCarForAction(a);
   const previousLocation = car.location || '';
 
   updateLocationWithHistory(car, a.location || '');
@@ -107,7 +166,7 @@ async function applyLocationUpdate(a /*, tctx */) {
 }
 
 async function applySold(a /*, tctx */) {
-  const car = await findCarByAction(a);
+  const car = await ensureCarForAction(a);
   const was = car.stage || '';
   car.stage = 'Sold';
   await car.save();
@@ -115,7 +174,7 @@ async function applySold(a /*, tctx */) {
 }
 
 async function addChecklistItem(a /*, tctx */) {
-  const car = await findCarByAction(a);
+  const car = await ensureCarForAction(a);
   const item = (a.checklistItem || '').trim();
   if (!item) throw new Error('Checklist item is empty');
 
@@ -127,7 +186,7 @@ async function addChecklistItem(a /*, tctx */) {
 }
 
 async function setReadinessStatus(a /*, tctx */) {
-  const car = await findCarByAction(a);
+  const car = await ensureCarForAction(a);
   const prev = car.readinessStatus || '';
   const next = (a.readiness || '').trim() || 'Ready';
   car.readinessStatus = next;
@@ -136,7 +195,7 @@ async function setReadinessStatus(a /*, tctx */) {
 }
 
 async function setNextLocation(a /*, tctx */) {
-  const car = await findCarByAction(a);
+  const car = await ensureCarForAction(a);
   const nl = (a.nextLocation || '').trim();
   if (nl) pushNextLocation(car, nl);
   await car.save();

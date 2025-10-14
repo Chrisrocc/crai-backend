@@ -191,7 +191,14 @@ function guessImageMime(buffer, filename = '') {
 /* ------------------------ minimal logging ------------------------ */
 bot.on('message', async (ctx, next) => {
   try {
-    console.log('INCOMING → chat.id:', ctx.chat?.id, 'type:', ctx.updateType, 'text:', ctx.message?.text || ctx.message?.caption || '');
+    console.log(
+      'INCOMING → chat.id:',
+      ctx.chat?.id,
+      'type:',
+      ctx.updateType,
+      'text:',
+      ctx.message?.text || ctx.message?.caption || ''
+    );
   } catch {}
   return next();
 });
@@ -230,31 +237,33 @@ bot.on('photo', async (ctx) => {
 
     const veh = await analyzeImageVehicle({ base64, mimeType });
 
-    // ----- Rego resolver with auto-create -----
+    // ----- Rego resolver with safe /api normalization and optional auto-create -----
     let correctedRego = veh.rego;
     let resolverNote = '';
 
     if (veh.rego && veh.make && veh.model) {
       try {
-        const rresp = await fetch(
-          `${process.env.BACKEND_URL || 'http://localhost:5000'}/api/cars/resolve-rego`,
-          {
-            method: 'POST',
-            headers: {
-              'content-type': 'application/json',
-              'X-Chat-Id': String(ctx.chat.id), // handy for server logs
-            },
-            body: JSON.stringify({
-              regoOCR: veh.rego,
-              make: veh.make,
-              model: veh.model,
-              color: veh.color,
-              ocrConfidence: veh.confidence || 0.9,
-              apply: true,
-              createIfMissing: true, // ⬅️ ensure minimal car exists before prompts
-            }),
-          }
-        );
+        // normalize BACKEND_URL so we always get exactly one "/api"
+        const RAW_BASE = process.env.BACKEND_URL || 'http://localhost:5000';
+        const base = RAW_BASE.replace(/\/+$/, '');                   // trim trailing slashes
+        const apiBase = /\/api\/?$/.test(base) ? base : `${base}/api`; // ensure ends with /api
+
+        const rresp = await fetch(`${apiBase}/cars/resolve-rego`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'X-Chat-Id': String(ctx.chat.id),
+          },
+          body: JSON.stringify({
+            regoOCR: veh.rego,
+            make: veh.make,
+            model: veh.model,
+            color: veh.color,
+            ocrConfidence: veh.confidence || 0.9,
+            apply: true,
+            createIfMissing: true, // ensure minimal car exists before prompts if no match
+          }),
+        });
 
         if (rresp.ok) {
           const rjson = await rresp.json();
@@ -263,14 +272,12 @@ bot.on('photo', async (ctx) => {
             resolverNote = ` (corrected from ${veh.rego})`;
             correctedRego = r.best.rego;
           } else if (r.action === 'created' && r.car?.rego) {
-            // created new car — use normalized rego
             correctedRego = r.car.rego;
-            resolverNote = resolverNote || '';
           } else if (r.action === 'exact' && r.car?.rego) {
             correctedRego = r.car.rego;
           }
         } else {
-          console.warn('resolve-rego non-OK:', rresp.status);
+          console.warn('resolve-rego non-OK:', rresp.status, `${apiBase}/cars/resolve-rego`);
         }
       } catch (e) {
         console.error('rego resolve error', e);

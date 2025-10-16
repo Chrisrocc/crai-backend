@@ -61,6 +61,22 @@ function diffNewChecklistItems(oldList, newList) {
   return added;
 }
 
+// ---------- DELETE /api/cars/:id ----------
+router.delete('/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const doc = await Car.findByIdAndDelete(id);
+    if (!doc) {
+      return res.status(404).json({ message: 'Car not found' });
+    }
+    return res.status(204).end(); // or res.json({ message: 'Car deleted' })
+  } catch (err) {
+    console.error('Delete car error:', err);
+    return res.status(400).json({ message: 'Error deleting car', error: err.message });
+  }
+});
+
+
 // ---------- GET /api/cars ----------
 router.get('/', async (_req, res) => {
   try {

@@ -144,7 +144,7 @@ Other guidance:
 - IMPORTANT: If a message mixes a prep instruction and a customer viewing, KEEP TWO SEPARATE LINES:
   e.g., "Bring out Kia Sorrento." and "Customer is coming to see the Kia Sorrento on Saturday."
 - Keep names. For example, don't change "Christian is coming to see Black Corolla" should NOT go to "Customer is coming to see the Black Corolla" 
-- Don't change names/don't get names confused with the sender. For Example Christian Roccuzzo: "Chiara is coming to see the Honda Civic today at 4:30pm" should NOT go to Christian Roccuzzo: "Christian is coming to see the Honda Civic today at 4:30pm"
+- Don't change names and don't get names confused with the sender. For Example Christian Roccuzzo: "Chiara is coming to see the Honda Civic today at 4:30pm" should NOT go to Christian Roccuzzo: "Christian is coming to see the Honda Civic today at 4:30pm"
 `;
 
 // =======================

@@ -152,6 +152,11 @@ Other guidance:
 // =======================
 
 // Static fallback categorizer (kept as backup)
+// =======================
+// Step 3: Categorize (no RECON keyword logic here)
+// =======================
+
+// Static fallback categorizer (kept as backup)
 const CATEGORIZE_SYSTEM = `
 You are provided with sub-messages from a car yard group chat. Each line starts with a sender (e.g., "Christian: …"). Some lines may begin with "[PHOTO]". Preserve the sender and any "[PHOTO]".
 Assign exactly one canonical category per output line. If a line legitimately belongs to two categories, DUPLICATE the line so each copy has one category.
@@ -211,8 +216,8 @@ DROP_OFF - Christian Roccuzzo: 'Drop off Dmax to Capital.'
 NEXT_LOCATION - Christian Roccuzzo: 'Drop off Dmax to Capital.'
 `;
 
-// Dynamic categorizer that promotes RECON when any user keyword appears
-function CATEGORIZE_SYSTEM_DYNAMIC(RECON_KEYWORDS_LIST) {
+// Dynamic categorizer (no keyword promotion)
+function CATEGORIZE_SYSTEM_DYNAMIC() {
   return `
 You are provided with sub-messages from a car yard group chat. Each line starts with a sender (e.g., "Christian: …"). Some lines may begin with "[PHOTO]". Preserve the sender and any "[PHOTO]".
 Assign exactly one canonical category per output line. If a line legitimately belongs to two categories, DUPLICATE the line so each copy has one category.
@@ -232,11 +237,7 @@ CANONICAL CATEGORIES:
 - OTHER
 - NEXT_LOCATION
 
-DB-driven rule:
-- If a line mentions ANY of these user-configured keywords (case-insensitive), classify it as RECON_APPOINTMENT (service/repair/RWC booking/visit), even if it also mentions a repair item:
-${RECON_KEYWORDS_LIST || '- none -'}
-
-Otherwise use these triggers:
+Use these triggers only:
 - READY: a specific car is ready.
 - DROP_OFF: drop/pickup/swap moves.
 - LOCATION_UPDATE: a car’s location has changed/is changing.
@@ -244,13 +245,15 @@ Otherwise use these triggers:
 - NEXT_LOCATION: future destination intent only.
 - TASK: people logistics or generic chores (photos, fuel, bring out, prep, etc).
 - REPAIR: mechanical/body/tyre/parts work needed (bonnet, oil leak, suspension).
+- RECON_APPOINTMENT: service/RWC/tint/tyres/battery type appointments (context-based, not keyword-based).
 - SOLD: car is sold.
 - OTHER: useful notes that aren’t actionable.
 
 Duplication:
-- If the same line is clearly both a movement (DROP_OFF/LOCATION_UPDATE) and a service job, you may duplicate as DROP_OFF (or LOCATION_UPDATE) and REPAIR—BUT if a user keyword is present, prefer RECON_APPOINTMENT instead of REPAIR.
+- If the same line is both a movement (DROP_OFF/LOCATION_UPDATE) and a service job, you may duplicate as DROP_OFF (or LOCATION_UPDATE) and REPAIR.
 `;
 }
+
 
 // ===================================================================
 // Extractors — ALL actions include: rego, make, model, badge, description, year

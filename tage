@@ -1,0 +1,166 @@
+[1mdiff --git a/src/middleware/requireAuth.js b/src/middleware/requireAuth.js[m
+[1mindex f7cd22e..d2037bb 100644[m
+[1m--- a/src/middleware/requireAuth.js[m
+[1m+++ b/src/middleware/requireAuth.js[m
+[36m@@ -1,12 +1,18 @@[m
+[32m+[m[32m// src/middleware/requireAuth.js[m
+ const jwt = require("jsonwebtoken");[m
+ const COOKIE_NAME = "sid";[m
+ [m
+ module.exports = function requireAuth(req, res, next) {[m
+[31m-  const token = req.cookies?.[COOKIE_NAME];[m
+[31m-  if (!token) return res.status(401).json({ message: "Unauthorized" });[m
+   try {[m
+[31m-    jwt.verify(token, process.env.JWT_SECRET || "changeme");[m
+[31m-    next();[m
+[32m+[m[32m    const fromCookie = req.cookies?.[COOKIE_NAME];[m
+[32m+[m[32m    const auth = req.headers.authorization || "";[m
+[32m+[m[32m    const fromHeader = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";[m
+[32m+[m
+[32m+[m[32m    const token = fromCookie || fromHeader;[m
+[32m+[m[32m    if (!token) return res.status(401).json({ message: "Unauthorized" });[m
+[32m+[m
+[32m+[m[32m    req.user = jwt.verify(token, process.env.JWT_SECRET || "changeme");[m
+[32m+[m[32m    return next();[m
+   } catch {[m
+     return res.status(401).json({ message: "Unauthorized" });[m
+   }[m
+[1mdiff --git a/src/routes/auth.js b/src/routes/auth.js[m
+[1mindex f81fc0a..3c9dbed 100644[m
+[1m--- a/src/routes/auth.js[m
+[1m+++ b/src/routes/auth.js[m
+[36m@@ -4,7 +4,7 @@[m [mconst jwt = require("jsonwebtoken");[m
+ [m
+ const router = express.Router();[m
+ [m
+[31m-// ---------- Config ----------[m
+[32m+[m[32m/* ----------------------- Config ----------------------- */[m
+ const JWT_SECRET = process.env.JWT_SECRET || "changeme"; // set real secret in prod[m
+ const MASTER_PASSWORD = process.env.MASTER_PASSWORD || "Fast5";[m
+ const ALLOW_LOGIN_DEV = String(process.env.ALLOW_LOGIN_DEV || "").toLowerCase() === "true";[m
+[36m@@ -12,25 +12,42 @@[m [mconst ALLOW_LOGIN_DEV = String(process.env.ALLOW_LOGIN_DEV || "").toLowerCase()[m
+ /** Compute cookie flags PER REQUEST so localhost & Pages both work */[m
+ function cookieOpts(req) {[m
+   const origin = req.headers.origin || "";[m
+[31m-  const host = req.headers.host || "";           // "localhost:5000" or "api.domain.com"[m
+[32m+[m[32m  const host = req.headers.host || ""; // "localhost:5000" or "api.domain.com"[m
+   const reqHostOnly = host.split(":")[0].toLowerCase();[m
+   let originHostOnly = reqHostOnly;[m
+   try { originHostOnly = new URL(origin).hostname.toLowerCase(); } catch {}[m
+   const isCrossSite = originHostOnly !== reqHostOnly;[m
+[31m-  const isHttps = req.secure || (req.headers["x-forwarded-proto"] || "").toLowerCase() === "https";[m
+[32m+[m
+[32m+[m[32m  const isHttps =[m
+[32m+[m[32m    req.secure || (req.headers["x-forwarded-proto"] || "").toLowerCase() === "https";[m
+[32m+[m
+[32m+[m[32m  // Cross-site needs SameSite=None; Secure[m
+   const sameSite = isCrossSite ? "None" : "Lax";[m
+   const secure = isHttps || sameSite === "None";[m
+[31m-  return { httpOnly: true, secure, sameSite, path: "/", maxAge: 1000 * 60 * 60 * 8 };[m
+[32m+[m
+[32m+[m[32m  return {[m
+[32m+[m[32m    httpOnly: true,[m
+[32m+[m[32m    secure,[m
+[32m+[m[32m    sameSite,[m
+[32m+[m[32m    path: "/",[m
+[32m+[m[32m    maxAge: 1000 * 60 * 60 * 8, // 8h[m
+[32m+[m[32m  };[m
+ }[m
+ [m
+ function sign(payload) {[m
+   return jwt.sign(payload, JWT_SECRET, { expiresIn: "8h" });[m
+ }[m
+ [m
+[31m-/** PUBLIC: sanity endpoint */[m
+[32m+[m[32m/* ----------------------- Public sanity endpoint ----------------------- */[m
+ router.get("/ping", (req, res) => {[m
+   const opts = cookieOpts(req);[m
+[31m-  console.log("[/auth/ping] origin=%s host=%s sameSite=%s secure=%s", req.headers.origin, req.headers.host, opts.sameSite, opts.secure);[m
+[32m+[m[32m  console.log([m
+[32m+[m[32m    "[/auth/ping] origin=%s host=%s sameSite=%s secure=%s",[m
+[32m+[m[32m    req.headers.origin,[m
+[32m+[m[32m    req.headers.host,[m
+[32m+[m[32m    opts.sameSite,[m
+[32m+[m[32m    opts.secure[m
+[32m+[m[32m  );[m
+   res.json({[m
+     ok: true,[m
+     nodeEnv: process.env.NODE_ENV || null,[m
+[36m@@ -41,11 +58,17 @@[m [mrouter.get("/ping", (req, res) => {[m
+   });[m
+ });[m
+ [m
+[32m+[m[32m/* ----------------------- Login ----------------------- */[m
+ // POST /api/auth/login  { password }[m
+ router.post("/login", (req, res) => {[m
+   try {[m
+     const bodyKeys = req.body ? Object.keys(req.body) : [];[m
+[31m-    console.log("[/login] origin=%s host=%s keys=%j", req.headers.origin, req.headers.host, bodyKeys);[m
+[32m+[m[32m    console.log([m
+[32m+[m[32m      "[/login] origin=%s host=%s keys=%j",[m
+[32m+[m[32m      req.headers.origin,[m
+[32m+[m[32m      req.headers.host,[m
+[32m+[m[32m      bodyKeys[m
+[32m+[m[32m    );[m
+ [m
+     if (!req.body || typeof req.body !== "object") {[m
+       return res.status(400).json({ message: "Bad request: no JSON body" });[m
+[36m@@ -62,7 +85,10 @@[m [mrouter.post("/login", (req, res) => {[m
+     }[m
+ [m
+     const token = sign({ role: "user" });[m
+[31m-    res.cookie("sid", token, cookieOpts(req)); // set cookie[m
+[32m+[m
+[32m+[m[32m    // Set cookie for same-site flows; frontend will also store token and send Bearer[m
+[32m+[m[32m    res.cookie("sid", token, cookieOpts(req));[m
+[32m+[m
+     return res.status(200).json({ message: "ok", token });[m
+   } catch (e) {[m
+     console.error("Auth login error:", e);[m
+[36m@@ -70,7 +96,7 @@[m [mrouter.post("/login", (req, res) => {[m
+   }[m
+ });[m
+ [m
+[31m-// Optional: DEV login to test cookie flow[m
+[32m+[m[32m/* ----------------------- Optional dev login ----------------------- */[m
+ router.post("/login-dev", (req, res) => {[m
+   if (!ALLOW_LOGIN_DEV) return res.status(403).json({ message: "Disabled" });[m
+   const token = sign({ role: "user", dev: true });[m
+[36m@@ -78,20 +104,33 @@[m [mrouter.post("/login-dev", (req, res) => {[m
+   return res.status(200).json({ message: "ok-dev", token });[m
+ });[m
+ [m
+[31m-// GET /api/auth/me[m
+[32m+[m[32m/* ----------------------- Session info ----------------------- */[m
+[32m+[m[32m// GET /api/auth/me  → accept cookie OR Bearer token (important for mobile)[m
+ router.get("/me", (req, res) => {[m
+[31m-  const token = req.cookies?.sid;[m
+[32m+[m[32m  // 1) Try cookie[m
+[32m+[m[32m  let token = req.cookies?.sid;[m
+[32m+[m
+[32m+[m[32m  // 2) Fallback to Authorization: Bearer <token>[m
+[32m+[m[32m  if (!token) {[m
+[32m+[m[32m    const auth = req.headers.authorization || "";[m
+[32m+[m[32m    if (auth.startsWith("Bearer ")) token = auth.slice(7).trim();[m
+[32m+[m[32m  }[m
+[32m+[m
+   if (!token) return res.status(401).json({ message: "Not logged in" });[m
+[32m+[m
+   try {[m
+     const payload = jwt.verify(token, JWT_SECRET);[m
+     return res.json({ ok: true, user: { role: payload.role || "user" } });[m
+   } catch {[m
+[31m-    res.clearCookie("sid", { ...cookieOpts(req), maxAge: 0 });[m
+[32m+[m[32m    // If there was a cookie and it’s invalid/expired, clear it[m
+[32m+[m[32m    if (req.cookies?.sid) {[m
+[32m+[m[32m      res.clearCookie("sid", { ...cookieOpts(req), maxAge: 0 });[m
+[32m+[m[32m    }[m
+     return res.status(401).json({ message: "Session expired" });[m
+   }[m
+ });[m
+ [m
+[31m-// POST /api/auth/logout[m
+[32m+[m[32m/* ----------------------- Logout ----------------------- */[m
+ router.post("/logout", (req, res) => {[m
+   res.clearCookie("sid", { ...cookieOpts(req), maxAge: 0 });[m
+   return res.json({ message: "bye" });[m

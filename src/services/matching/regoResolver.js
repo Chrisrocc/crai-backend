@@ -36,12 +36,13 @@ async function resolveRego({ regoOCR, make, model, color, ocrConfidence = 0.9, a
     regs: cars.map(c => c.rego),
   });
 
+  // ✅ If no candidates found — signal to create a new car
   if (!cars.length || !ocr) {
     audit.write(auditCtx, 'rego.resolve.no-candidates', { summary: baseSummary });
-    return { action: 'reject', best: null, alts: [], distances: null };
+    return { action: 'create', best: null, alts: [], distances: null };
   }
 
-  // score
+  // score each
   const scored = cars.map(c => {
     const lev = levenshtein(ocr, c.rego);
     const conf = confusionDistance(ocr, c.rego);
@@ -59,7 +60,7 @@ async function resolveRego({ regoOCR, make, model, color, ocrConfidence = 0.9, a
     })),
   });
 
-  // Decide
+  // exact match
   if (best && best.lev === 0) {
     audit.write(auditCtx, 'rego.resolve.exact', { summary: `exact:${best.rego}` });
     return { action: 'exact', best, alts: scored.slice(1, 5), distances: { lev: best.lev, confusion: best.confusion, total: best.total } };
@@ -67,7 +68,7 @@ async function resolveRego({ regoOCR, make, model, color, ocrConfidence = 0.9, a
 
   if (!best) {
     audit.write(auditCtx, 'rego.resolve.reject', { summary: 'no-best' });
-    return { action: 'reject', best: null, alts: [], distances: null };
+    return { action: 'create', best: null, alts: [], distances: null };
   }
 
   const safe = isSafeAutoFix(best, second, ocrConfidence);
@@ -79,7 +80,6 @@ async function resolveRego({ regoOCR, make, model, color, ocrConfidence = 0.9, a
   };
 
   if (apply && safe) {
-    // no DB mutation here — we just signal the corrected rego.
     audit.write(auditCtx, 'rego.resolve.apply', {
       summary: `auto-fix:${best.rego} (from:${ocr})`,
       best,

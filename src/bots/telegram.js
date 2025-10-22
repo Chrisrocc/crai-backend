@@ -11,6 +11,7 @@ const {
   addChecklistItem,
   setReadinessStatus,
   setNextLocation,
+  ensureCarForAction,
 } = require('../services/updaters/carUpdater');
 
 const { createDropOffTask, createGenericTask } = require('../services/creators/taskCreator');
@@ -25,10 +26,8 @@ if (!BOT_TOKEN) throw new Error('Missing TELEGRAM_BOT_TOKEN');
 
 const bot = new Telegraf(BOT_TOKEN);
 
-/* ------------------ Silence/notify controls ------------------
-   - TELEGRAM_SILENT_ALL_GROUPS=true  → never reply in groups/supergroups
-   - TELEGRAM_SILENT_GROUP_IDS="id1,id2" → silence only listed chat ids
-   - TELEGRAM_ADMIN_CHAT_ID=123456789 → forward notifications there instead
+/* ----------------------------------------------------------------
+   Silence / notify controls
 ---------------------------------------------------------------- */
 const SILENT_ALL_GROUPS = String(process.env.TELEGRAM_SILENT_ALL_GROUPS || 'true').toLowerCase() === 'true';
 const SILENT_GROUP_IDS = new Set(
@@ -80,7 +79,9 @@ async function notifyChatOrAdmin(chatId, text, extra) {
   }
 }
 
-/* ------------------- Batcher (1-minute windows) ------------------- */
+/* ----------------------------------------------------------------
+   Batch window (1 minute)
+---------------------------------------------------------------- */
 const batcher = new Batcher({
   windowMs: 60_000,
   onFlush: async (chatId, messages) => {
@@ -160,13 +161,14 @@ const batcher = new Batcher({
 
     const header = `🧾 Processed ${messages.length} message(s) → ${actions.length} action(s)`;
     const body = [header, ...(out.length ? out : ['No actionable updates.'])].join('\n');
-
     await notifyChatOrAdmin(chatId, body);
     timeline.print(tctx);
   },
 });
 
-/* --------------------------- helpers --------------------------- */
+/* ----------------------------------------------------------------
+   Helpers
+---------------------------------------------------------------- */
 const senderName = (ctx) => {
   const u = ctx.from || {};
   return u.username || [u.first_name, u.last_name].filter(Boolean).join(' ') || 'Unknown';
@@ -184,11 +186,12 @@ function guessImageMime(buffer, filename = '') {
   if (ext === 'webp') return 'image/webp';
   if (buffer.length > 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
   if (buffer.length > 8 && buffer.slice(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) return 'image/png';
-  if (buffer.length > 12 && buffer.slice(0, 4).toString('ascii') === 'RIFF' && buffer.slice(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
   return 'image/jpeg';
 }
 
-/* ------------------------ minimal logging ------------------------ */
+/* ----------------------------------------------------------------
+   Logging & Commands
+---------------------------------------------------------------- */
 bot.on('message', async (ctx, next) => {
   try {
     console.log(
@@ -204,17 +207,21 @@ bot.on('message', async (ctx, next) => {
 });
 
 bot.command('ping', (ctx) => safeReply(ctx, 'pong'));
-bot.command('id',   (ctx) => safeReply(ctx, `chat.id: ${ctx.chat?.id}`));
+bot.command('id', (ctx) => safeReply(ctx, `chat.id: ${ctx.chat?.id}`));
 
-/* ------------------------------ TEXT ------------------------------ */
+/* ----------------------------------------------------------------
+   TEXT handler
+---------------------------------------------------------------- */
 bot.on('text', async (ctx) => {
   const text = ctx.message?.text?.trim();
   if (!text) return;
   addToBatch(ctx, text, ctx.message.message_id);
-  await safeReply(ctx, '📦 Added to 1-min batch…');
+  await safeReply(ctx, '📦 Added to 1-minute batch…');
 });
 
-/* ------------------------------ PHOTO ----------------------------- */
+/* ----------------------------------------------------------------
+   PHOTO handler — includes car auto-creation logic
+---------------------------------------------------------------- */
 bot.on('photo', async (ctx) => {
   const photos = ctx.message.photo || [];
   if (!photos.length) return safeReply(ctx, '⚠️ No photo sizes found.');
@@ -237,60 +244,50 @@ bot.on('photo', async (ctx) => {
 
     const veh = await analyzeImageVehicle({ base64, mimeType });
 
-    // ----- Rego resolver with safe /api normalization and optional auto-create -----
-    let correctedRego = veh.rego;
-    let resolverNote = '';
-
-    if (veh.rego && veh.make && veh.model) {
-      try {
-        // normalize BACKEND_URL so we always get exactly one "/api"
-        const RAW_BASE = process.env.BACKEND_URL || 'http://localhost:5000';
-        const base = RAW_BASE.replace(/\/+$/, '');                   // trim trailing slashes
-        const apiBase = /\/api\/?$/.test(base) ? base : `${base}/api`; // ensure ends with /api
-
-        const rresp = await fetch(`${apiBase}/cars/resolve-rego`, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            'X-Chat-Id': String(ctx.chat.id),
-          },
-          body: JSON.stringify({
-            regoOCR: veh.rego,
-            make: veh.make,
-            model: veh.model,
-            color: veh.color,
-            ocrConfidence: veh.confidence || 0.9,
-            apply: true,
-            createIfMissing: true, // ensure minimal car exists before prompts if no match
-          }),
-        });
-
-        if (rresp.ok) {
-          const rjson = await rresp.json();
-          const r = rjson?.data || {};
-          if (r.action === 'auto-fix' && r.best?.rego) {
-            resolverNote = ` (corrected from ${veh.rego})`;
-            correctedRego = r.best.rego;
-          } else if (r.action === 'created' && r.car?.rego) {
-            correctedRego = r.car.rego;
-          } else if (r.action === 'exact' && r.car?.rego) {
-            correctedRego = r.car.rego;
-          }
-        } else {
-          console.warn('resolve-rego non-OK:', rresp.status, `${apiBase}/cars/resolve-rego`);
-        }
-      } catch (e) {
-        console.error('rego resolve error', e);
-      }
+    // ✅ NEW STEP — always ensure car exists before anything else
+    if (veh.rego && (veh.make || veh.model)) {
+      await ensureCarForAction({
+        rego: veh.rego,
+        make: veh.make,
+        model: veh.model,
+        badge: veh.badge,
+        color: veh.color,
+        year: veh.year,
+        description: veh.description,
+      });
+      console.log(`✅ Ensured car exists: ${veh.rego} (${veh.make} ${veh.model})`);
     }
 
-    const parts = [];
-    if (veh.make) parts.push(veh.make);
-    if (veh.model) parts.push(veh.model);
-    if (veh.color) parts.push(veh.color);
-    if (correctedRego) parts.push(`Rego ${correctedRego}${resolverNote}`);
+    // Run resolver after creation
+    let correctedRego = veh.rego;
+    try {
+      const RAW_BASE = process.env.BACKEND_URL || 'http://localhost:5000';
+      const base = RAW_BASE.replace(/\/+$/, '');
+      const apiBase = /\/api\/?$/.test(base) ? base : `${base}/api`;
 
-    const analysis = `Photo analysis: ${parts.join(' ') || '(no vehicle detected)'}`;
+      const rresp = await fetch(`${apiBase}/cars/resolve-rego`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          regoOCR: veh.rego,
+          make: veh.make,
+          model: veh.model,
+          color: veh.color,
+          ocrConfidence: veh.confidence || 0.9,
+          apply: true,
+        }),
+      });
+      if (rresp.ok) {
+        const rjson = await rresp.json();
+        const r = rjson?.data || {};
+        if (r.action === 'auto-fix' && r.best?.rego) correctedRego = r.best.rego;
+      }
+    } catch (err) {
+      console.warn('resolve-rego error:', err.message);
+    }
+
+    const desc = [veh.make, veh.model, veh.color].filter(Boolean).join(' ');
+    const analysis = `Photo analysis: ${desc} Rego ${correctedRego}`;
     const ok = batcher.updateMessage(ctx.chat.id, key, analysis);
 
     const cap = (ctx.message.caption || '').trim();

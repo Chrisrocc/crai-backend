@@ -1,3 +1,4 @@
+// src/routes/cars.js
 const express = require('express');
 const router = express.Router();
 const Car = require('../models/Car');
@@ -5,7 +6,8 @@ const Car = require('../models/Car');
 // AI helpers
 const { decideCategoryForChecklist } = require('../services/ai/categoryDecider');
 const { upsertReconFromChecklist } = require('../services/reconUpsert');
-const { normalizeChecklist } = require('../services/ai/checklistDeduper');
+// ⬇️ CHANGE: use the manual normalizer so we don't auto-prepend "Inspect" for user/Telegram/Recon inputs
+const { normalizeChecklistManual } = require('../services/ai/checklistDeduper');
 
 // ---------- helpers ----------
 const normalizeRego = (s) =>
@@ -102,7 +104,8 @@ router.post('/', async (req, res) => {
         ? body.year
         : (String(body.year || '').trim() ? Number(body.year) : undefined),
       description: body.description?.trim() || '',
-      checklist: normalizeChecklist(toCsvArray(body.checklist || [])),
+      // ⬇️ CHANGE: manual normalizer (trim + dedupe only, no "Inspect" injection)
+      checklist: normalizeChecklistManual(toCsvArray(body.checklist || [])),
       location: body.location?.trim() || '',
       nextLocations: [],
       readinessStatus: body.readinessStatus?.trim() || '',
@@ -129,7 +132,8 @@ router.post('/', async (req, res) => {
     payload.nextLocations = stripCurrentFromNext(payload.nextLocations, payload.location);
 
     const doc = new Car(payload);
-    doc.checklist = normalizeChecklist(doc.checklist);
+    // ⬇️ CHANGE: keep as-typed on create
+    doc.checklist = normalizeChecklistManual(doc.checklist);
     await doc.save();
 
     res.status(201).json({ message: 'Car created successfully', data: doc.toJSON() });
@@ -149,7 +153,8 @@ router.put('/:id', async (req, res) => {
     const doc = await Car.findById(id);
     if (!doc) return res.status(404).json({ message: 'Car not found' });
 
-    const beforeChecklist = normalizeChecklist(doc.checklist || []);
+    // ⬇️ CHANGE: compare using manual-normalized set (no auto "Inspect")
+    const beforeChecklist = normalizeChecklistManual(doc.checklist || []);
 
     if (body.rego !== undefined) doc.rego = normalizeRego(body.rego || '');
     if (body.make !== undefined) doc.make = String(body.make || '').trim();
@@ -165,7 +170,8 @@ router.put('/:id', async (req, res) => {
     if (body.description !== undefined) doc.description = String(body.description || '').trim();
 
     if (body.checklist !== undefined) {
-      doc.checklist = normalizeChecklist(toCsvArray(body.checklist));
+      // ⬇️ CHANGE: manual normalizer on update
+      doc.checklist = normalizeChecklistManual(toCsvArray(body.checklist));
     }
 
     if (Array.isArray(body.nextLocations)) {
@@ -230,11 +236,13 @@ router.put('/:id', async (req, res) => {
       doc.nextLocations = stripCurrentFromNext(doc.nextLocations, doc.location);
     }
 
-    doc.checklist = normalizeChecklist(doc.checklist || []);
+    // ⬇️ CHANGE: keep as-typed on save
+    doc.checklist = normalizeChecklistManual(doc.checklist || []);
     await doc.save();
 
     try {
-      const afterChecklist = normalizeChecklist(doc.checklist || []);
+      // ⬇️ CHANGE: diff using manual-normalized lists
+      const afterChecklist = normalizeChecklistManual(doc.checklist || []);
       const newlyAdded = diffNewChecklistItems(beforeChecklist, afterChecklist);
 
       if (newlyAdded.length) {

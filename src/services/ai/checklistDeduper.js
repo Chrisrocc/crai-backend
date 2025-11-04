@@ -1,6 +1,8 @@
+// src/services/ai/checklistDeduper.js
+
 // Opinionated normalizer + fuzzy de-duper for checklist items.
-// Final canonical form is ALWAYS: "Inspect <Damage> - <Location>"
-// If no location:                   "Inspect <Damage> - vehicle"
+// AI path -> normalizeChecklistAI: produces canonical "Inspect <Damage> - <Location>" lines.
+// Manual path -> normalizeChecklistManual: leaves text as-typed (trim + dedupe only).
 
 const SIDE_MAP = new Map([
   ['lhs', 'left'], ['left hand side', 'left'], ['left-hand side', 'left'],
@@ -25,10 +27,11 @@ const AREA_SYNONYMS = [
 ];
 
 const ISSUE_SYNONYMS = [
+  [/^inspect\s+/gi, ''],                       // NEW: if model already prepended "Inspect", strip it from the issue portion
   [/scuffs?/gi, 'Scratch'],
   [/scrapes?/gi, 'Scratch'],
   [/dings?|dints?/gi, 'Dent'],
-  [/chips?/gi, 'Scratch'],                 // keep inside canonical set
+  [/chips?/gi, 'Scratch'],
   [/peel(ing)?|clear\s*coat(\s*failure)?/gi, 'Paint Peel'],
   [/hail\s*damage?/gi, 'Hail Damage'],
   [/cracks?|cracked/gi, 'Crack'],
@@ -36,8 +39,7 @@ const ISSUE_SYNONYMS = [
   [/burn(ed|t)?|melt(ed|ing)?|heat\s*damage/gi, 'Burn'],
 ];
 
-// Keep stop-words minimal so location terms (front/rear/left/right/driver/passenger)
-// REMAIN in the token set and affect dedupe.
+// Keep stop-words minimal so location terms remain meaningful for dedupe.
 const STOP_WORDS = new Set([
   'inspect','possible','for','the','a','an','of','and','to','on','in','at','area','near','around'
 ]);
@@ -77,19 +79,21 @@ function normalizeArea(area){
 function normalizeIssue(issue){
   if (!issue) return '';
   let i = ' ' + issue + ' ';
-  i = applySynonyms(i, ISSUE_SYNONYMS);
+  i = applySynonyms(i, ISSUE_SYNONYMS);        // includes stripping any leading "Inspect "
   i = i.replace(/[^a-z0-9\s/-]/gi,' ').replace(/\s+/g,' ').trim();
   return titlecase(i);
 }
 
 /**
- * Convert any phrasing into: "Inspect <Damage> - <Location>"
+ * Convert various phrasings into the canonical AI form:
+ *   "Inspect <Damage> - <Location>"
  * Accepts:
  *   - "Inspect <loc> for <issue>"
  *   - "<issue> (<loc>)"
  *   - "Inspect <issue> - <loc>"
- *   - "<issue> at|on <loc>"
+ *   - "<issue> at|on|near <loc>"
  *   - "<area> for <issue>"
+ *   - "<issue> - <area>"
  */
 function toInspectCanonical(s){
   let t = normalizeSpaces(String(s||''));
@@ -131,12 +135,12 @@ function toInspectCanonical(s){
   if(!issue){
     m = t.match(/^(.+?)\s*-\s*(.+)$/);
     if (m){
-      issue = normalizeIssue(m[1]);
+      issue = normalizeIssue(m[1]);            // ISSUE_SYNONYMS already strips a leading "Inspect "
       area  = normalizeArea(m[2]);
     }
   }
 
-  // Fallback “guess”
+  // Fallback
   if(!issue){
     const guess = normalizeIssue(t);
     if (guess){
@@ -165,12 +169,12 @@ function jaccard(a,b){
   return union ? inter/union : 0;
 }
 
+/** -------------------------- PUBLIC NORMALIZERS -------------------------- **/
+
 /**
- * Normalize + fuzzy de-dupe.
- * @param {string[]} items
- * @param {number} threshold similarity to consider duplicates
+ * AI path: normalize + fuzzy de-dupe into strict canonical form.
  */
-function normalizeChecklist(items, threshold=0.8){
+function normalizeChecklistAI(items, threshold=0.8){
   const canon = (Array.isArray(items)?items:[])
     .map(s=>toInspectCanonical(s))
     .filter(Boolean);
@@ -187,4 +191,33 @@ function normalizeChecklist(items, threshold=0.8){
   return out;
 }
 
-module.exports = { normalizeChecklist, toInspectCanonical };
+/**
+ * Manual/Telegram/Recon path: DO NOT rephrase, DO NOT add "Inspect".
+ * - trim whitespace
+ * - collapse internal spaces
+ * - case-insensitive dedupe (also ignoring repeated spaces)
+ */
+function normalizeChecklistManual(items){
+  const norm = (Array.isArray(items)?items:[])
+    .map(s => normalizeSpaces(String(s||'')))
+    .filter(Boolean);
+
+  const seen = new Set();
+  const out = [];
+  for (const s of norm){
+    const key = s.toLowerCase().replace(/\s+/g,' ');
+    if (!seen.has(key)){
+      seen.add(key);
+      out.push(s);               // keep exactly as typed
+    }
+  }
+  return out;
+}
+
+module.exports = {
+  // AI
+  normalizeChecklistAI,
+  toInspectCanonical,
+  // Manual
+  normalizeChecklistManual,
+};

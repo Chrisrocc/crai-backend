@@ -1,25 +1,120 @@
 // src/prompts/pipelinePrompts.js
 
 // =======================
-// Step 1: Filter (expand bullets, attach photos, keep only actionable)
+// Step 0: Photo Merger (attach photo analyses logically to text)
 // =======================
-const FILTER_SYSTEM = `
-You convert WhatsApp/Telegram style notes into ONLY actionable car statements.
+const PHOTO_MERGER_SYSTEM = `
+Your goal is to convert messages from a car yard business group chat into actionable points. In this prompt you are attaching photo messages to the corresponding text messages. 
 
 Return STRICT minified JSON only:
 {"messages":[{"speaker":"","text":""}]}
 
-Input format: each sub-message starts with a sender label like "Christian:" or "Unknown:". Some lines may start with "[PHOTO]" to indicate photo analysis.
+Input format
+- Text message input will be in the format {"speaker": "Christian", "text": "Customer coming to see this today at 12"} 
+- Photo messages will be analyzed and converted into text with [PHOTO] preceding the analysis, the format will look like {"speaker": "Christian", "text": "[PHOTO] Photo: Grey Volkswagen Golf R, rego 1OY2AJ"}. 
+    - So [PHOTO] means that the message was an analysed photo 
+
+All photo messages need to be logically attached to a text message. 
+For example 
+
+[
+  {"speaker": "Christian", "text": "Customer coming to see this today at 12"},
+  {"speaker": "Christian", "text": "[PHOTO] Photo: Grey Volkswagen Golf R, rego 1OY2AJ"},
+  {"speaker": "Christian", "text": "[PHOTO] Photo: White Ford Falcon FGX rego F6X175"},
+  {"speaker": "Christian", "text": "this is at haythams"}
+]
+
+
+{"speaker": "Christian", "text": "Customer coming to see this today at 12"} in this message "this" would refer to the grey volkswagen [PHOTO] Photo: Grey Volkswagen Golf R, rego 1OY2AJ because in the group chat the user would say "customer coming to see this" + photo of the car. So from this the actionable point would be "Customer is coming to the Grey Volkswagen Golf R, rego 1OY2AJ today at 12" 
+
+As there is now another photo message and a text message, and just logically then, the second actionable point would be "White Ford Falcon FGX rego F6X175 is at Haytham's"
+
+However remember to always use logic as some cases two photos might belong to one message. Where multiple photos clearly relate to one message using “these, or a similar term” combine them logically into one message
+
+{"speaker": "Christian", "text": "these are at haythams"}
+{"speaker": "Christian", "text": "[PHOTO] Photo: Grey Volkswagen Golf R, rego 1OY2AJ"},
+{"speaker": "Christian", "text": "[PHOTO] Photo: White Ford Falcon FGX rego F6X175"},
+
+The actionable point would be 
+
+Grey Volkswagen Golf R, rego 1OY2AJ and White Ford Falcon FGX rego F6X175 are at Haytham's 
+
+Here are some examples of input and output 
+
+[
+  {
+    "input": [
+      {"speaker": "Christian", "text": "Customer coming to see this today at 12"},
+      {"speaker": "Christian", "text": "[PHOTO] Photo analysis: Grey Volkswagen Golf R, rego 1OY2AJ"}
+    ],
+    "output": {
+      "messages": [
+        {"speaker": "Christian", "text": "[PHOTO] Customer coming to see Grey Volkswagen Golf R, rego 1OY2AJ today at 12"}
+      ]
+    }
+  },
+
+  {
+    "input": [
+      {"speaker": "Christian", "text": "[PHOTO] Photo analysis: oil leak on floor under engine bay"},
+      {"speaker": "Christian", "text": "under the Amarok AYX900"}
+    ],
+    "output": {
+      "messages": [
+        {"speaker": "Christian", "text": "[PHOTO] Oil leak under the Amarok AYX900"}
+      ]
+    }
+  },
+
+  {
+    "input": [
+      {"speaker": "Christian", "text": "[PHOTO] Photo analysis: dashboard light visible but unclear"},
+      {"speaker": "Christian", "text": "belongs to the Pajero"}
+    ],
+    "output": {
+      "messages": [
+        {"speaker": "Christian", "text": "[PHOTO] Unclear dashboard warning light on the Pajero"}
+      ]
+    }
+  },
+
+  {
+    "input": [
+      {"speaker": "Christian", "text": "[PHOTO] Photo analysis: set of alloy wheels"},
+      {"speaker": "Christian", "text": "fit these to the Hilux"}
+    ],
+    "output": {
+      "messages": [
+        {"speaker": "Christian", "text": "[PHOTO] Set of alloy wheels to fit on the Hilux"}
+      ]
+    }
+  }
+]
+`;
+
+// =======================
+// Step 1: Filter (expand bullets, attach photos, keep only actionable)
+// =======================
+const FILTER_SYSTEM = `
+You convert WhatsApp/Telegram style notes from a car yard business group chat into ONLY actionable car statements.
+
+Return STRICT minified JSON only:
+{"messages":[{"speaker":"","text":""}]}
+
+Input format:
+Each sub-message starts with a sender label like "Christian:" or "Unknown:". Some lines may start with "[PHOTO]" if they already contain attached photo analysis text — treat these simply as part of the message.
 
 Core rules:
-- Keep items about: location changes, readiness, repairs, sold status, drop-offs/pickups/swaps, customer appointments, reconditioning appointments, next-location intent, or concrete tasks/To Dos.
+- Keep items about: location updates, readiness, repairs, sold status, drop-offs/pickups/swaps, customer appointments, reconditioning appointments, next-location intents, or specific actionable To-Do items.
 - Expand bullet points and lists: each bullet becomes its own message, carrying forward the last known sender.
-- If a line begins with "[PHOTO]" or "Photo analysis:", treat it as a car description; ATTACH it to the most logically related nearby message from the same sender so the resulting line is standalone and actionable (e.g., "...is at Unique", "…needs a bonnet").
-- Preserve specific details: rego/make/model + badge/series/year/color/accessories + locations, destinations, names, date/times.
-- Do NOT drop useful information. Merge fragments when necessary so each final line is standalone and actionable.
-- If none remain, return {"messages":[]}.
+- Preserve all concrete details: rego, make, model, badge, year, color, accessories, dates/times, people, and places.
+- Merge or rewrite fragmented sentences so each final message is clear and standalone.
+- Normalize casual or shorthand phrasing into full, natural statements.
+- Do NOT include irrelevant chatter or system text.
+- If no actionable messages remain, return {"messages":[]}.
 
-Your style rules (examples condensed):
+Style rules (examples condensed):
+
 1) Multi-line “lists” under a heading:
    "Christian: Clean:
     - Triton
@@ -30,135 +125,173 @@ Your style rules (examples condensed):
    - "Christian: Clean GTI"
    - "Christian: Clean 2 cars from Unique"
 
-2) Keep actionable parts and normalize noise:
+2) Normalize and clarify meaning:
    Input:
-   - "the AC for the gti doesn't work, its blowing hot air"
+   - "the AC for the gti doesn't work its blowing hot air"
    - "fuck"
-   - "nah thats okay"
    - "lets not get it to peter mode"
-   - "i will order a relay for it, theyre like $10"
+   - "i will order a relay for it"
    Output:
-   - "the AC in the GTI is malfunctioning and blowing hot air"
-   - "don't get Peter mode to inspect the GTI"
-   - "order a relay for the GTI AC they are around $10"
+   - "The AC in the GTI is malfunctioning and blowing hot air"
+   - "Don't get Peter Mode to inspect the GTI"
+   - "Order a relay for the GTI AC"
 
-3) Do not disregard useful context:
+3) Preserve directional and intent context:
    - "On my way to pick up Volvo from Maher going to Essendon from there"
-     → "Christian is picking up Volvo from Maher and going to Essendon"
-   - "Lets fix the pajero brake lights and indicator light i fixed the horn alrady"
-     → "Fix Pajero brake light and indicator. Horn is fixed"
+     → "Christian is picking up the Volvo from Maher and going to Essendon"
+   - "Lets fix the pajero brake lights and indicator light i fixed the horn already"
+     → "Fix Pajero brake lights and indicator lights. Horn is fixed"
 
-4) Photo Analysis handling:
-   - Always attach a photo analysis to a message where it makes the most logical sense (closest line from the same sender unless clearly indicated otherwise).
-   - Do not apply a single “this” message to multiple photos unless clearly stated “these”.
-   Examples:
-   - "Customer coming to see this today at 12"
-   - [PHOTO] "Photo: Grey Volkswagen Golf R, rego 1OY2AJ"
-   - [PHOTO] "Photo: White Ford Falcon FGX rego F6X175"
-   - "this is at haythams"
+4) Reflect actor intent:
+   - "Sam: I will pick up the Outlander at MMM"
+     → "Sam will pick up the Outlander at MMM"
+
+5) Split to minimal actionable lines:
+   - "Haytham has the XR6 and Hilux ready. Let's take them to Imad for the Ranger. Take the Ranger to Al's"
    Output:
-   - "[PHOTO] Customer coming to see Grey Volkswagen Golf R, rego 1OY2AJ today at 12pm"
-   - "[PHOTO] White Ford Falcon FGX rego F6X175 is at Haytham's"
+   - "XR6 and Hilux are ready at Haytham's"
+   - "Take the XR6 and Hilux from Haytham's to Imad for the Ranger"
+   - "Take the Ranger from Imad's to Al's"
 
-5) Reflect actor intent:
-   - "Sam: I will pick up the outlander at MMM" → "Sam will pick up the Outlander at MMM"
-
-6) Split to minimal clear lines when multiple cars/actions:
-   - "Haytham has the XR6 and Hilux ready. Let's take them to imad for the Ranger. Take the ranger to als"
-   Output:
-   - "XR6 and Hilux are ready at Haythams"
-   - "Take the XR6 and Hilux at Haythams to Imad for the Ranger"
-   - "Take the Ranger at Imads to Al's"
-
-7) Include to/from locations when present:
-   - "I am taking the Colorado from capital to Louie and coming back in the Triton"
+6) Include to/from locations:
+   - "I am taking the Colorado from Capital to Louie and coming back in the Triton"
    Output:
    - "Christian is taking the Colorado from Capital to Louie"
    - "Christian is coming back in the Triton from Louie"
 
-8) Do not split conditions/notes that belong with an action:
-   - "take Liberty to imad. Imad has nothing but will take it today"
-     → "take Liberty to imad. Imad has nothing but will take it today"
+7) Do not separate dependent conditions:
+   - "Take Liberty to Imad. Imad has nothing but will take it today"
+     → "Take Liberty to Imad. Imad has nothing but will take it today"
 
-9) Non-car photos:
-   - If photo analysis is about damage/parts and a nearby line references a car, attach/merge meaningfully:
-     [PHOTO] "Photo Analysis: Motor oil on floor"
-     "Blue Astra"
-     → "Blue Astra has potential oil leak"
-   - If the message conflicts with the photo, prefer the message’s intent when it is clearly corrective.
+8) Photo lines already attached:
+   - If a message begins with “[PHOTO]”, treat it as a normal actionable sentence (already processed in a previous step).  
+     Example: "[PHOTO] Oil leak under the Amarok AYX900" → Keep unchanged.
 
-10) Large guidance messages → distill to minimal actionable lines:
-     "Please do not leave windows down … put all windows up Monday …"
-     → "Please don't leave windows down except 2 inches after detail"
-     → "On Monday put all windows up"
+9) Parts and damage context:
+   - "Needs new bonnet and respray front bar for GTI" → "GTI needs new bonnet and front bar respray"
 
-11) When the message states something like "Cars for details: - Ford Falcon - CX9". That means that each of those cars need detailing.
+10) Combine appointment and prep tasks if appropriate:
+   - "Bring out the Triton for customer tomorrow at 12" → 
+     "Bring out the Triton for customer viewing tomorrow at 12"
 
-12) IMPORTANT: If a message contains BOTH a prep/movement instruction like "bring out / take out / pull out / bring to front / prep" AND a customer viewing (e.g., "customer is coming to see it Saturday"), produce TWO separate lines:
-    - One line for the viewing (customer appointment),
-    - One line for the prep/movement (task).
-    Do NOT merge them into a single sentence.
+11) When a message includes multiple cars or actions, split them clearly:
+    "Wash the XR6 and Pajero" → 
+    - "Wash XR6"
+    - "Wash Pajero"
 
-If nothing actionable remains, return {"messages":[]}.
+If no actionable content remains, return {"messages":[]}.
 `;
 
 // =======================
-// Step 2: Refine (canonical wording + conditional splitting + pickup inference + two-person pairing)
+// Step 2: Refine (canonical wording + conditional splitting + pickup inference)
 // =======================
 const REFINE_SYSTEM = `
-You normalize actionable statements to canonical wording (do NOT invent facts).
+
+You normalize actionable vehicle statements into clear, canonical wording (without inventing or assuming facts).
 
 Return STRICT minified JSON only:
 {"messages":[{"speaker":"","text":""}]}
 
-Normalization:
-- Make/model: Proper Case (e.g., "Toyota Corolla"). If make is missing but the model uniquely implies a make (e.g., "Corolla"), include the make.
-- Rego: UPPERCASE, no spaces (e.g., "XYZ789").
-- Prefer forms like: "is located at …", "is sold", "needs …", "is ready", "drop off … to …", "next location …".
-- Keep descriptive tokens helpful for identification (badge/series, year, color, unique accessories like "bulbar/roof racks").
+Primary goal:
+- Normalize grammar, casing, and phrasing for clarity and consistency.
+- DO NOT infer new facts, people, locations, or intent that are not explicitly stated.
+- Preserve every correct name, vehicle, rego, and relationship exactly as provided.
 
-Conditional splitting & pickup inference:
-- When a line contains a movement with a condition (e.g., "X to Y when Z is ready"):
-  1) Create a movement line that keeps the condition in clear terms (e.g., "Drop off X to Y when Z is ready").
-  2) If the same sentence (or nearby lines from the same sender) mention specific cars being ready at that destination (e.g., "Hummer ready too"), infer intent to pick them up and append a concise note:
-     "Drop off Tesla to Al when Mazda 3 is ready, to pick up Mazda 3 and Hummer".
+----------------------------------
+CORE NORMALIZATION RULES
+----------------------------------
+• Vehicle names:
+  - Make/model in Proper Case (e.g., "Toyota Corolla", "Ford Falcon XR6").
+  - If the make is omitted but the model uniquely implies it, add the make (e.g., "Corolla" → "Toyota Corolla").
+  - Rego in UPPERCASE with no spaces (e.g., "XYZ789").
+  - Include helpful identifiers like badge, series, year, and color when given (e.g., "2016 White Hilux SR5").
 
-TWO-PERSON PAIRING (merge into one line):
-- If the same sender provides a pair that references the SAME destination/logistics:
-  a) "one person drop the <vehicle> at/to <destination>"
-  b) "the other person pick (them|driver) up from <destination>" (or equivalent)
-- MERGE into ONE refined line:
-  "Drop off <vehicle> to <destination>; second person in <other vehicle> picks up driver(s) from <destination>."
-- Keep it as a single action line; do not duplicate.
+• Sentence phrasing:
+  - Use direct, active phrasing:
+    - "is located at …"
+    - "is sold"
+    - "needs …"
+    - "is ready"
+    - "drop off … to …"
+    - "next location …"
+  - Remove unnecessary filler but keep all specific details.
 
-People logistics as tasks:
-- Movements of people without moving a car (e.g., "Return in Ford Ranger and Audi A4") should be kept as concise TASK-like statements:
-  "Return in Ford Ranger and Audi A4".
+• Preserve all factual and diagnostic info:
+  - Keep mentions of faults, repairs, or symptoms:
+    e.g., "Nissan Navara D22 is running rough at idle."
+  - Keep mentions of tradespeople or staff:
+    e.g., "Rick is coming to fix the steering wheel on the Ford Falcon."
 
-Other guidance:
-- If a sentence includes multiple cars or actions, split into the minimal clear lines.
-- Preserve conditions (“if/when/until”) inside the line unless clarity requires a split.
-- Preserve all names. For example "Rick is coming to fix the steering wheel on the Ford Falcon".
-- Preserve all symptoms/problems with cars. For example "Nissan Navara D22 is running rough at idle".
-- IMPORTANT: Do NOT rewrite "bring out / take out / pull out / bring to front / prep" as "drop off" unless a destination "to <place>" is explicitly stated.
-- IMPORTANT: If a message mixes a prep instruction and a customer viewing, KEEP TWO SEPARATE LINES:
-  e.g., "Bring out Kia Sorrento." and "Customer is coming to see the Kia Sorrento on Saturday."
-- Keep names. For example, don't change "Christian is coming to see Black Corolla" should NOT go to "Customer is coming to see the Black Corolla" 
-- Don't change names and don't get names confused with the sender. For Example Christian Roccuzzo: "Chiara is coming to see the Honda Civic today at 4:30pm" should NOT go to Christian Roccuzzo: "Christian is coming to see the Honda Civic today at 4:30pm"
+----------------------------------
+NAME-PRESERVATION & ROLE LOGIC
+----------------------------------
+⚠️ The most critical rule:
+- **NEVER replace or reinterpret people’s names.**
+- A name mentioned inside the message always refers to that person — do NOT confuse it with the sender’s name.
+
+Examples:
+✅ Christian Roccuzzo: "Chiara is coming to see the Honda Civic today at 4:30pm"
+→ "Chiara is coming to see the Honda Civic today at 4:30pm"
+❌ NEVER change to "Christian is coming…" or "Customer is coming…"
+
+If a message says “Customer” or “Buyer,” keep it as written — do not replace it with a specific name unless explicitly stated.
+
+----------------------------------
+MOVEMENT & CONDITIONAL LOGIC
+----------------------------------
+• When a line contains a movement with a condition ("X to Y when Z is ready"):
+  1. Keep both parts in one sentence:
+     "Drop off Triton to Al when Ranger is ready."
+  2. If nearby lines mention cars to pick up at that same destination, extend concisely:
+     "Drop off Triton to Al when Ranger is ready, to pick up Ranger and Hummer."
+
+• Two-person pairing (same destination):
+  - Combine into one line:
+    "Drop off Hilux to Imad; second person in Pajero picks up drivers from Imad."
+
+• People-only logistics (no vehicle moved):
+  - Keep short task form:
+    "Return in Ford Ranger and Audi A4."
+
+----------------------------------
+ADDITIONAL RULES
+----------------------------------
+• Split multi-car or multi-action lines into separate clear statements:
+  "Wash XR6 and Pajero" → "Wash XR6." + "Wash Pajero."
+
+• Keep conditional wording (“if / when / until”) for clarity.
+
+• Do not re-categorize prep instructions:
+  - "Bring out / take out / pull out / bring to front / prep" ≠ "drop off"
+    unless the message explicitly includes a destination ("to Al’s").
+
+• When a line mixes prep and customer viewing:
+  → Create two separate lines:
+    - "Bring out Kia Sorento."
+    - "Customer is coming to see the Kia Sorento on Saturday."
+
+• Maintain clear subjects:
+  - If a name is given as the actor, retain it (“Rick will pick up…”).
+  - If not, and the text is an instruction, leave it impersonal (“Take the Outlander to Louie.”)
+
+----------------------------------
+QUALITY REQUIREMENTS
+----------------------------------
+- Never hallucinate or fill in missing names, times, or destinations.
+- Never confuse sender and mentioned names.
+- Never drop valid context.
+- Ensure every message is complete, concise, and stands alone logically.
+
+If nothing actionable remains, return:
+{"messages":[]}
+
 `;
 
 // =======================
 // Step 3: Categorize (DB-driven hook for RECON via keywords)
 // =======================
-
-// Static fallback categorizer (kept as backup)
-// =======================
-// Step 3: Categorize (no RECON keyword logic here)
-// =======================
-
-// Static fallback categorizer (kept as backup)
 const CATEGORIZE_SYSTEM = `
-You are provided with sub-messages from a car yard group chat. Each line starts with a sender (e.g., "Christian: …"). Some lines may begin with "[PHOTO]". Preserve the sender and any "[PHOTO]".
+You are provided with actionable points from telegram messages from a car yard group chat. Each line starts with a sender (e.g., "Christian: …"). Some lines may begin with "[PHOTO]". Preserve the sender and any "[PHOTO]".
 Assign exactly one canonical category per output line. If a line legitimately belongs to two categories, DUPLICATE the line so each copy has one category.
 
 Return STRICT minified JSON only:
@@ -201,22 +334,20 @@ Triggers:
 Dual-category rules:
 - If a car is going somewhere for service/RWC/repairs, produce BOTH: (DROP_OFF or LOCATION_UPDATE) AND REPAIR (duplicate the line with one category each).
 - If a line implies a viewing AND a prep/movement instruction, DUPLICATE as CUSTOMER_APPOINTMENT + TASK (or DROP_OFF if destination named).
-- If a line is catgeories as REPAIR, duplicate the line and create a RECON_APPOINTMENT and vice versa 
-For Example
-Christian Roccuzzo: 'Toyota Camry TGS655 needs taillights replaced.'
-OUTPUT 
-REPAIR - Christian Roccuzzo: 'Toyota Camry TGS655 needs taillights replaced.'
-RECON_APPOINTMENT - Christian Roccuzzo: 'Toyota Camry TGS655 needs taillights replaced.'
-
-- If a line is catgeories as DROP_OFF, duplicate the line and create a NEXT_LOCATION NOT vice versa  
-For Example
-Christian Roccuzzo: 'Drop off Dmax to Capital.'
-OUTPUT
-DROP_OFF - Christian Roccuzzo: 'Drop off Dmax to Capital.'
-NEXT_LOCATION - Christian Roccuzzo: 'Drop off Dmax to Capital.'
+- If a line is categorized as REPAIR, duplicate it as RECON_APPOINTMENT too.
+  Example:
+  Christian: "Toyota Camry TGS655 needs taillights replaced."
+  →
+  REPAIR - Christian: "Toyota Camry TGS655 needs taillights replaced."
+  RECON_APPOINTMENT - Christian: "Toyota Camry TGS655 needs taillights replaced."
+- If a line is categorized as DROP_OFF, duplicate it as NEXT_LOCATION (not vice versa).
+  Example:
+  Christian: "Drop off Dmax to Capital."
+  →
+  DROP_OFF - Christian: "Drop off Dmax to Capital."
+  NEXT_LOCATION - Christian: "Drop off Dmax to Capital."
 `;
 
-// Dynamic categorizer (no keyword promotion)
 function CATEGORIZE_SYSTEM_DYNAMIC() {
   return `
 You are provided with sub-messages from a car yard group chat. Each line starts with a sender (e.g., "Christian: …"). Some lines may begin with "[PHOTO]". Preserve the sender and any "[PHOTO]".
@@ -250,10 +381,9 @@ Use these triggers only:
 - OTHER: useful notes that aren’t actionable.
 
 Duplication:
-- If the same line is both a movement (DROP_OFF/LOCATION_UPDATE) and a service job, you may duplicate as DROP_OFF (or LOCATION_UPDATE) and REPAIR.
+- If the same line is both a movement (DROP_OFF/LOCATION_UPDATE) and a service job, duplicate as DROP_OFF (or LOCATION_UPDATE) and REPAIR.
 `;
 }
-
 
 // ===================================================================
 // Extractors — ALL actions include: rego, make, model, badge, description, year
@@ -403,10 +533,11 @@ Return STRICT minified JSON only:
 `;
 
 module.exports = {
+  PHOTO_MERGER_SYSTEM,
   FILTER_SYSTEM,
   REFINE_SYSTEM,
   CATEGORIZE_SYSTEM,
-  CATEGORIZE_SYSTEM_DYNAMIC,              // dynamic RECON promotion
+  CATEGORIZE_SYSTEM_DYNAMIC,
   EXTRACT_LOCATION_UPDATE,
   EXTRACT_SOLD,
   EXTRACT_REPAIR,

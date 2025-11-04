@@ -36,7 +36,7 @@ async function geminiGenerate(parts, genCfg = {}) {
     body: JSON.stringify({
       contents: [{ role: 'user', parts }],
       generationConfig: genCfg,
-    })
+    }),
   });
   if (!resp.ok) {
     const t = await resp.text();
@@ -81,6 +81,12 @@ async function analyzeImageVehicle({ base64, mimeType }) {
   const allowed = new Set(['image/jpeg', 'image/png', 'image/webp']);
   if (!allowed.has(mimeType)) mimeType = 'image/jpeg';
 
+  // --- Validate image data length ---
+  if (!base64 || base64.length < 1000) {
+    console.warn('⚠️ Gemini skipped: image base64 too short or missing');
+    return { make: '', model: '', rego: '', colorDescription: '', analysis: '' };
+  }
+
   const prompt = `You are analyzing a photo sent in a car yard business chat.
 Return ONLY minified JSON:
 {"make":"","model":"","rego":"","colorDescription":"","analysis":""}
@@ -89,47 +95,47 @@ Rules:
 - If the photo clearly shows a vehicle:
   - Fill "make", "model", "rego", and "colorDescription" (e.g., "white ute with canopy", "black hatchback").
   - "rego" must be uppercase with no spaces (e.g., "XYZ789"). If unclear, "".
-  - "analysis" should briefly describe the photo (e.g., "front bumper dent", "at Haytham's", "muddy", "needs wash").
-- If the photo does NOT clearly show a vehicle:
+  - "analysis" should briefly describe the photo (e.g., "front bumper dent", "muddy", "at Haytham's").
+- If the photo does NOT clearly show a vehicle (e.g., oil, parts, dash lights, tools, wheels):
   - Leave make/model/rego/colorDescription empty.
-  - Use "analysis" to describe what it shows (short but specific):
+  - "analysis" should describe what it shows, short but specific:
     Examples:
     - "oil leak on floor under engine bay"
+    - "fluid leak beneath front end"
     - "check engine light illuminated"
     - "dashboard light visible but unclear"
     - "set of alloy wheels"
     - "front bumper removed"
     - "engine part possibly turbocharger"
     - "pile of spare parts on floor"
-- Keep answers factual and concise.
 - Always return valid minified JSON with exactly these 5 keys.
-`;
+- Never include explanatory text outside JSON.`;
 
-  const raw = await geminiGenerate(
-    [{ inlineData: { data: base64, mimeType } }, { text: prompt }],
-    {}
-  );
+  let raw = '';
+  try {
+    raw = await geminiGenerate(
+      [
+        { inlineData: { mimeType, data: base64 } },
+        { text: prompt },
+      ],
+      { temperature: 0.2 }
+    );
+  } catch (e) {
+    console.warn('⚠️ Gemini request failed:', e.message);
+    return { make: '', model: '', rego: '', colorDescription: '', analysis: '' };
+  }
 
   if (!raw) {
-    return {
-      make: '',
-      model: '',
-      rego: '',
-      colorDescription: '',
-      analysis: '',
-    };
+    console.warn('⚠️ Gemini returned empty response');
+    return { make: '', model: '', rego: '', colorDescription: '', analysis: '' };
   }
 
   const obj = extractJson(raw) || {};
   const parsed = VehicleSchema.safeParse(obj);
+
   if (!parsed.success) {
-    return {
-      make: '',
-      model: '',
-      rego: '',
-      colorDescription: '',
-      analysis: '',
-    };
+    console.warn('⚠️ Gemini returned invalid JSON:', raw);
+    return { make: '', model: '', rego: '', colorDescription: '', analysis: '' };
   }
 
   const out = parsed.data;

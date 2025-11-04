@@ -23,21 +23,27 @@ const xai = (XAI_API_KEY && OpenAI)
 function extractJson(s) {
   if (!s) return {};
   const m = String(s).match(/{[\s\S]*}/);
-  try { return m ? JSON.parse(m[0]) : JSON.parse(s); } catch { return {}; }
+  try {
+    return m ? JSON.parse(m[0]) : JSON.parse(s);
+  } catch {
+    return {};
+  }
 }
 
 // ---------- Gemini REST generate ----------
 async function geminiGenerate(parts, genCfg = {}) {
   if (!GOOGLE_API_KEY) return '';
   const url = `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(GOOGLE_API_KEY)}`;
+
   const resp = await fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      contents: [{ role: 'user', parts }],
+      contents: [{ parts }], // ✅ fixed: remove role:user, ensures Gemini sees the image
       generationConfig: genCfg,
     }),
   });
+
   if (!resp.ok) {
     const t = await resp.text();
     console.warn(`Gemini REST ${resp.status}: ${t.slice(0, 400)}`);
@@ -81,7 +87,6 @@ async function analyzeImageVehicle({ base64, mimeType }) {
   const allowed = new Set(['image/jpeg', 'image/png', 'image/webp']);
   if (!allowed.has(mimeType)) mimeType = 'image/jpeg';
 
-  // --- Validate image data length ---
   if (!base64 || base64.length < 1000) {
     console.warn('⚠️ Gemini skipped: image base64 too short or missing');
     return { make: '', model: '', rego: '', colorDescription: '', analysis: '' };
@@ -95,7 +100,7 @@ Rules:
 - If the photo clearly shows a vehicle:
   - Fill "make", "model", "rego", and "colorDescription" (e.g., "white ute with canopy", "black hatchback").
   - "rego" must be uppercase with no spaces (e.g., "XYZ789"). If unclear, "".
-  - "analysis" should briefly describe the photo (e.g., "front bumper dent", "muddy", "at Haytham's").
+  - "analysis" should briefly describe the photo (e.g., "front bumper dent", "at Haytham's", "muddy", "needs wash").
 - If the photo does NOT clearly show a vehicle (e.g., oil, parts, dash lights, tools, wheels):
   - Leave make/model/rego/colorDescription empty.
   - "analysis" should describe what it shows, short but specific:

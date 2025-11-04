@@ -16,7 +16,11 @@ const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || '';
 const MODEL_NAME = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const MAX_BYTES = 8 * 1024 * 1024;
 
-/* ------------------------------ small utils ------------------------------ */
+/* -------------------------------------------------------------------------- */
+/* utils                                                                      */
+/* -------------------------------------------------------------------------- */
+
+const lc = (s) => String(s || '').toLowerCase().trim();
 
 function stripFencesToJson(text) {
   if (!text) return null;
@@ -25,114 +29,219 @@ function stripFencesToJson(text) {
   try { return JSON.parse(m ? m[0] : s); } catch { return null; }
 }
 
-const lc = (s) => String(s || '').toLowerCase().trim();
-
-/* ------------------------ normalization / aggregation --------------------- */
-
-/**
- * Canonical damage label set (very small, intentionally).
- * We map many synonyms into this tiny set.
- */
-const CANON_DAMAGES = {
-  dint: ['dint', 'dent', 'ding'],
-  scratch: ['scratch', 'scrape', 'scuff', 'chip', 'stone chip', 'chipped'],
-  crack: ['crack', 'cracked', 'fracture', 'split'],
-  rust: ['rust', 'corrosion'],
-  peel: ['paint peel', 'peel', 'clear coat', 'clearcoat', 'clear-coat', 'clear coat peel'],
-  hail: ['hail', 'hail damage'],
-  burn: ['burn', 'melt', 'heat damage'],
-  'oil leak': ['oil leak', 'engine oil leak'],
-  'fluid leak': ['fluid leak', 'coolant leak', 'transmission leak', 'power steering leak', 'ps fluid', 'leak'],
-  'warning light': ['warning light', 'check engine', 'engine light', 'abs light', 'srs light'],
-};
-
-const DAMAGE_LOOKUP = new Map();
-for (const [canon, arr] of Object.entries(CANON_DAMAGES)) {
-  for (const k of arr) DAMAGE_LOOKUP.set(k, canon);
+function titlecase(s) {
+  return String(s || '').toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
 }
 
-/** Try to map any phrase to a canonical damage label. */
-function canonDamage(s) {
-  const t = lc(s);
+/* -------------------------------------------------------------------------- */
+/* Canonical vocab                                                             */
+/* -------------------------------------------------------------------------- */
+
+/** Damage → canonical (keep tiny, opinionated) */
+const DAMAGE_CANON = new Map([
+  // dents/dints/dings
+  [/^(dent|dint|ding)s?$/i, 'dint'],
+  // scratches/scrapes/scuffs/chips
+  [/^(scratch|scrape|scuff|chip|stone chip|chipped)s?$/i, 'scrape'],
+  // cracks
+  [/^(crack|cracked|fracture|split)s?$/i, 'crack'],
+  // paint peel / clear coat
+  [/^(paint ?peel|clear ?coat( failure)?|peel(ing)?)$/i, 'peel'],
+  // rust
+  [/^rust(ing)?|corrosion$/i, 'rust'],
+  // leaks / fluids
+  [/^oil leak$/i, 'oil leak'],
+  [/^(fluid leak|coolant leak|transmission leak|power steering leak|ps fluid|leak)$/i, 'fluid leak'],
+  // warning lights
+  [/^(warning light|check engine|engine light|abs light|srs light)$/i, 'warning light'],
+]);
+
+/** Prioritise output ordering a little (serious → cosmetic) */
+const DAMAGE_ORDER = ['crack', 'dint', 'peel', 'rust', 'oil leak', 'fluid leak', 'warning light', 'scrape'];
+
+/** Panel synonyms → canonical panel (Australian phrasing) */
+const PANEL_RULES = [
+  // front bar / bumper family
+  [/^(front (bar|bumper)(?: .*|)|front grille|front lower grille|grille|number plate|license plate)(.*)?$/i, 'front bar'],
+  [/^front right bumper.*$/i, 'front bar'],
+  [/^front left bumper.*$/i, 'front bar'],
+  [/^front bumper.*$/i, 'front bar'],
+  // rear bar
+  [/^(rear (bar|bumper).*)$/i, 'rear bar'],
+  // fenders (guards)
+  [/^(front left fender|left front guard|left fender|lf fender|lf guard)$/i, 'left fender'],
+  [/^(front right fender|right front guard|right fender|rf fender|rf guard)$/i, 'right fender'],
+  [/^(rear left fender|left rear guard|lr fender|lr guard)$/i, 'left rear fender'],
+  [/^(rear right fender|right rear guard|rr fender|rr guard)$/i, 'right rear fender'],
+  // doors
+  [/^(front left door|left front door)$/i, 'left front door'],
+  [/^(front right door|right front door)$/i, 'right front door'],
+  [/^(rear left door|left rear door)$/i, 'left rear door'],
+  [/^(rear right door|right rear door)$/i, 'right rear door'],
+  // bonnet / boot / tailgate
+  [/^(bonnet|hood)$/i, 'bonnet'],
+  [/^(boot lid|boot|trunk)$/i, 'boot lid'],
+  [/^(tailgate)$/i, 'tailgate'],
+  // quarters
+  [/^(left quarter panel|left quarter)$/i, 'left rear fender'],
+  [/^(right quarter panel|right quarter)$/i, 'right rear fender'],
+  // mirrors
+  [/^(left mirror|driver mirror)$/i, 'left mirror'],
+  [/^(right mirror|passenger mirror)$/i, 'right mirror'],
+  // generic catch
+  [/^windshield|windscreen$/i, 'windscreen'],
+  [/^roof$/i, 'roof'],
+];
+
+/** Sub-area noise terms we will strip (corner, lower, side etc.) */
+const SUBAREA_NOISE = /\b(corner|lower|upper|side|outer|inner|edge|section|area|panel|cover|plastic|trim|bar)\b/gi;
+
+/* -------------------------------------------------------------------------- */
+/* Parsing & Normalisation                                                    */
+/* -------------------------------------------------------------------------- */
+
+function canonDamage(raw) {
+  const t = lc(raw);
   if (!t) return null;
-  if (DAMAGE_LOOKUP.has(t)) return DAMAGE_LOOKUP.get(t);
-  // fallback: contains match
-  for (const [k, v] of DAMAGE_LOOKUP.entries()) {
-    if (t.includes(k)) return v;
+
+  // exact matches over regex map
+  for (const [re, canon] of DAMAGE_CANON.entries()) {
+    if (re.test(t)) return canon;
   }
-  // last resort: exact match to one of canon keys
-  if (CANON_DAMAGES[t]) return t;
+
+  // contains fallbacks
+  if (t.includes('dent') || t.includes('dint') || t.includes('ding')) return 'dint';
+  if (t.includes('chip') || t.includes('scrape') || t.includes('scuff') || t.includes('scratch')) return 'scrape';
+  if (t.includes('crack')) return 'crack';
+  if (t.includes('clear coat') || t.includes('peel')) return 'peel';
+  if (t.includes('rust') || t.includes('corrosion')) return 'rust';
+  if (t.includes('oil') && t.includes('leak')) return 'oil leak';
+  if (t.includes('leak')) return 'fluid leak';
+  if (t.includes('warning') || t.includes('engine light') || t.includes('abs')) return 'warning light';
+
   return null;
 }
 
-/**
- * Try to parse "Inspect Scratch - Front Left Fender"
- * Returns { panel: 'front left fender', damage: 'scratch' } or null
- */
-function parseInspectLine(line) {
-  const m = String(line || '').match(/^inspect\s+(.+?)\s*-\s*(.+)$/i);
-  if (!m) return null;
-  const issue = m[1];
-  const where = m[2];
+function canonPanel(raw) {
+  let t = lc(raw).replace(SUBAREA_NOISE, ' ').replace(/\s+/g, ' ').trim();
+  if (!t) return null;
 
-  const damage = canonDamage(issue);
-  if (!damage) return null;
+  // normalise common side codes and phrasing
+  t = t.replace(/\blhs\b/g, 'left')
+       .replace(/\brhs\b/g, 'right')
+       .replace(/\bleft front\b/g, 'front left')
+       .replace(/\bright front\b/g, 'front right')
+       .replace(/\bleft rear\b/g, 'rear left')
+       .replace(/\bright rear\b/g, 'rear right');
 
-  // panels are kept simple/lowercase; scrub some noise words
-  let panel = lc(where)
-    .replace(/\barea\b/g, '')
-    .replace(/\btrim\b/g, ' trim') // keep "trim" if present
-    .replace(/\bpanel\b/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  // try direct mapping rules
+  for (const [re, canon] of PANEL_RULES) {
+    if (re.test(t)) return canon;
+  }
 
-  if (!panel) return null;
+  // broader heuristics
+  if (/(front).*(bar|bumper|grille|plate)/.test(t)) return 'front bar';
+  if (/(rear).*(bar|bumper)/.test(t)) return 'rear bar';
+  if (/(front|left).*(fender|guard)/.test(t)) return t.includes('right') ? 'right fender' : 'left fender';
+  if (/(right).*(fender|guard)/.test(t)) return 'right fender';
 
-  return { panel, damage };
+  // keep short, human
+  return t;
 }
 
-/**
- * Force 1 line per panel:
- * Aggregates all damages for a panel and renders:
- *   "Inspect <panel> for <d1> & <d2> & <d3>"
+/** Parse anything like:
+ *  - "Inspect Scratch - Front Left Fender"
+ *  - "scratch front left fender"
+ *  - "dent on front bumper lower grille"
+ * → { panel: 'front bar', damage: 'scrape' }
  */
-function aggregateOneLinePerPanel(lines = []) {
-  const bucket = new Map(); // panel -> Set(damages)
-  for (const ln of lines) {
-    const p = parseInspectLine(ln);
-    if (!p) continue;
-    if (!bucket.has(p.panel)) bucket.set(p.panel, new Set());
-    bucket.get(p.panel).add(p.damage);
+function parseLineToPair(s) {
+  const t = lc(s);
+
+  // If already "Inspect X - Y", split that
+  let m = t.match(/^inspect\s+(.+?)\s*-\s*(.+)$/i);
+  if (m) {
+    const dmg = canonDamage(m[1]);
+    const pnl = canonPanel(m[2]);
+    if (dmg && pnl) return { panel: pnl, damage: dmg };
   }
 
-  const out = [];
-  for (const [panel, damagesSet] of bucket.entries()) {
-    const damages = Array.from(damagesSet);
-    if (!damages.length) continue;
-    const joined = damages.length === 1
-      ? damages[0]
-      : damages.slice(0, -1).join(' & ') + ' & ' + damages.slice(-1);
-    out.push(`Inspect ${panel} for ${joined}`);
+  // "<damage> on|at|for <panel>"
+  m = t.match(/^(.+?)\s+(?:on|at|for|near)\s+(.+)$/i);
+  if (m) {
+    const dmg = canonDamage(m[1]);
+    const pnl = canonPanel(m[2]);
+    if (dmg && pnl) return { panel: pnl, damage: dmg };
   }
+
+  // "<damage> <panel>" simple
+  m = t.match(/^([a-z\s-]+?)\s+([a-z].*)$/i);
+  if (m) {
+    const dmg = canonDamage(m[1]);
+    const pnl = canonPanel(m[2]);
+    if (dmg && pnl) return { panel: pnl, damage: dmg };
+  }
+
+  // Fallback: try to guess damage, shove panel to 'vehicle'
+  const dmg = canonDamage(t);
+  if (dmg) return { panel: 'vehicle', damage: dmg };
+  return null;
+}
+
+/* Aggregate to ONE LINE PER PANEL: "Inspect <panel>: dint, scrape, crack" */
+function aggregateOneLinePerPanel(lines) {
+  const bucket = new Map(); // panel -> Set(damage)
+  for (const s of lines || []) {
+    const p = parseLineToPair(s);
+    if (!p) continue;
+
+    // collapse hyper-specific panel bits (e.g., license plate) into front bar
+    let panel = p.panel;
+    if (panel === 'license plate' || /plate/.test(panel)) panel = 'front bar';
+
+    if (!bucket.has(panel)) bucket.set(panel, new Set());
+    bucket.get(panel).add(p.damage);
+  }
+
+  // Sort damages by our preference order
+  const orderIdx = (d) => {
+    const i = DAMAGE_ORDER.indexOf(d);
+    return i === -1 ? 999 : i;
+  };
+
+  const out = [];
+  for (const [panel, set] of bucket.entries()) {
+    const damages = [...set].sort((a, b) => orderIdx(a) - orderIdx(b));
+    if (!damages.length) continue;
+    out.push(`Inspect ${panel}: ${damages.join(', ')}`);
+  }
+  // stable-ish: front bar first, then others alpha
+  out.sort((a, b) => {
+    if (a.includes('Inspect front bar:') && !b.includes('Inspect front bar:')) return -1;
+    if (!a.includes('Inspect front bar:') && b.includes('Inspect front bar:')) return 1;
+    return a.localeCompare(b);
+  });
   return out;
 }
 
-/* --------------------------- model interactions --------------------------- */
+/* -------------------------------------------------------------------------- */
+/* Model calls                                                                */
+/* -------------------------------------------------------------------------- */
 
-// Step 1: Image -> rough free-form sentences
 async function callGeminiRough({ bytes, mimeType, caption }) {
   if (!GOOGLE_API_KEY) return { sentences: [], _raw: '{}' };
 
   const url = `https://generativelanguage.googleapis.com/v1/models/${MODEL_NAME}:generateContent?key=${encodeURIComponent(GOOGLE_API_KEY)}`;
+
   const prompt = `
 Return ONLY MINIFIED JSON:
 {"sentences":["..."]}
 
 Goal:
-- From the vehicle photo, output short rough findings (one per bullet).
-- Focus ONLY on visible damage/defects and obvious accessories.
-- Examples: "scratch front left fender", "dent front bumper lower left", "paint peel left fender", "snorkel".
-- Skip duplicates and near-duplicates. Max 60 items.
+- From the vehicle photo, output very short findings like "dint front bar", "scrape left fender", "crack front bar".
+- Prefer panel-level terms (front bar/bumper, left/right fender, doors, bonnet, tailgate, boot lid).
+- Avoid sub-areas like "corner/side/lower grille/number plate" if possible.
+- Strictly dedupe. Max 40 items.
 `.trim();
 
   const parts = [
@@ -145,10 +254,7 @@ Goal:
     const resp = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts }],
-        generationConfig: { temperature: 0.1 }
-      })
+      body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature: 0.05 } })
     });
     const json = await resp.json();
     const text = json?.candidates?.[0]?.content?.parts?.find(p => p.text)?.text || '';
@@ -161,56 +267,40 @@ Goal:
   }
 }
 
-// Step 2: Rough -> normalized "Inspect <Damage> - <Panel>" lines
+/* Rough → aggregated per-panel lines (we’ll still parse & normalise locally) */
 async function aiRefineChecklist(sentences = [], hint = '') {
+  // We’ll do the heavy lifting locally; the model just helps list rough findings
   const list = (Array.isArray(sentences) ? sentences : []).slice(0, 120);
-  if (!list.length) return { description: '', checklist: [] };
 
+  // Light dust-off with the LLM to push toward "<damage> <panel>" tokens
+  // (This helps when the raw caption is flowery.)
   const prompt = `
 Return ONLY minified JSON:
-{"description":"","checklist":["Inspect <Damage> - <Panel>"]}
+{"findings":["damage panel", "..."]}
 
 Rules:
-- Each item MUST be exactly: Inspect <Damage> - <Panel>
-- Title Case NOT required; keep it simple; we'll normalize ourselves.
-- <Damage> should be from this tiny set:
-  { Dent | Scratch | Crack | Rust | Paint Peel | Hail Damage | Burn | Oil Leak | Fluid Leak | Warning Light }
-- Map synonyms: dint/ding/dent -> Dent; scuff/scrape/chip -> Scratch; corrosion -> Rust;
-  clear coat/peel -> Paint Peel; leaked fluids -> Fluid Leak; cracked -> Crack.
-- <Panel> should be a short human panel name (e.g., "front bumper", "left fender").
-- Avoid duplicates and near-duplicates, but it's OK if same panel appears more than once (we will merge later).
-- "description" = optional short comma list of obvious accessories or colour words.
+- Convert each bullet to short tokens like "dint front bar", "scrape left fender", "crack bonnet".
+- Avoid sub-areas (corner/side/lower grille/number plate). Prefer panel names.
+- One issue per item. Dedupe exact duplicates. Max 40 items.
 
-Findings:
-${list.map(x => `- ${String(x)}`).join('\n')}
+Bullets:
+${list.map(s => `- ${String(s)}`).join('\n')}
 ${hint ? `Hints: ${hint}` : ''}
 `.trim();
 
-  const text = await geminiGenerate([{ text: prompt }], { temperature: 0.05 });
-  const obj = stripFencesToJson(text) || {};
-  const raw = Array.isArray(obj.checklist) ? obj.checklist : [];
-  // Normalize into our Inspect <Damage> - <Panel> shape (best-effort)
-  const normalized = raw
-    .map((s) => String(s || '').trim())
-    .filter(Boolean)
-    .map((s) => {
-      // If already "Inspect X - Y", leave as is
-      if (/^inspect\s+.+?-\s*.+/i.test(s)) return s;
-      // Try to coerce simple "damage panel" -> Inspect Damage - Panel
-      const bits = lc(s).split(/\s+-\s+| on | at | near | for /i);
-      if (bits.length >= 2) {
-        const dmg = bits[0];
-        const pnl = bits.slice(1).join(' ');
-        return `Inspect ${dmg} - ${pnl}`;
-      }
-      return s.startsWith('Inspect') ? s : `Inspect ${s}`;
-    });
-
-  const description = String(obj.description || '').trim();
-  return { description, checklist: normalized };
+  try {
+    const text = await geminiGenerate([{ text: prompt }], { temperature: 0.05 });
+    const obj = stripFencesToJson(text) || {};
+    const findings = Array.isArray(obj.findings) ? obj.findings.map(x => String(x).trim()).filter(Boolean) : [];
+    return { findings };
+  } catch {
+    return { findings: list };
+  }
 }
 
-/* ------------------------------- Public API ------------------------------- */
+/* -------------------------------------------------------------------------- */
+/* Public: analyze bytes → ONE LINE PER PANEL                                 */
+/* -------------------------------------------------------------------------- */
 
 async function analyzeWithGemini({ bytes, mimeType = 'image/jpeg', caption = '' }, tctx) {
   if (!bytes?.length) return { inspect: [], notes: 'empty', features: [], colours: [], damages: [] };
@@ -220,29 +310,28 @@ async function analyzeWithGemini({ bytes, mimeType = 'image/jpeg', caption = '' 
   const roughRes = await callGeminiRough({ bytes, mimeType, caption });
   const rough = roughRes.sentences;
 
-  // 2) rough → normalized Inspect lines
-  const refined = await aiRefineChecklist(rough, caption || '');
-  const rawInspect = Array.isArray(refined.checklist) ? refined.checklist : [];
+  // 2) nudge to "<damage> <panel>" tokens
+  const { findings } = await aiRefineChecklist(rough, caption || '');
 
-  // 3) HARD aggregation: one line per panel (always)
-  const inspect = aggregateOneLinePerPanel(rawInspect);
-
-  const description = String(refined.description || '').trim();
+  // 3) HARD local aggregation: ONE LINE PER PANEL
+  const inspect = aggregateOneLinePerPanel(findings);
 
   audit.write(tctx, 'vision.response', {
-    summary: `rough:${rough.length} normalized:${rawInspect.length} final:${inspect.length}`,
+    summary: `rough:${rough.length} findings:${findings.length} final:${inspect.length}`,
     out: {
       rough: rough.slice(0, 10),
-      normalizedSample: rawInspect.slice(0, 10),
-      finalSample: inspect.slice(0, 10),
-      description: description.slice(0, 160)
+      findingsSample: findings.slice(0, 10),
+      finalSample: inspect.slice(0, 10)
     }
   });
 
-  return { features: [], colours: [], damages: [], inspect, notes: description };
+  // You can add a short descriptive note later if you want; keep empty for now.
+  return { features: [], colours: [], damages: [], inspect, notes: '' };
 }
 
-/* --------------------------- S3 convenience path -------------------------- */
+/* -------------------------------------------------------------------------- */
+/* S3 path                                                                    */
+/* -------------------------------------------------------------------------- */
 
 async function analyzeCarS3Key({ key, caption = '' }, tctx) {
   try {
@@ -259,44 +348,34 @@ async function analyzeCarS3Key({ key, caption = '' }, tctx) {
   }
 }
 
-/* -------------------------- persistence into Mongo ------------------------ */
+/* -------------------------------------------------------------------------- */
+/* Persist into Mongo (AI-only writer)                                        */
+/* -------------------------------------------------------------------------- */
 
 async function enrichCarWithFindings({ carId, features = [], colours = [], damages = [], inspect = [], notes = '' }, tctx) {
   const car = await Car.findById(carId);
   if (!car) throw new Error('Car not found');
 
-  // We ONLY persist the already-aggregated, basic form:
+  // Only AI writes here → keep user-entered formatting untouched elsewhere.
   const checklist = new Set(Array.isArray(car.checklist) ? car.checklist : []);
   (inspect || []).forEach(i => {
     const v = String(i || '').trim();
     if (v) checklist.add(v);
   });
 
-  // Merge description hints very lightly
-  const desc = new Set(
-    String(car.description || '')
-      .split(',')
-      .map(s => s.trim())
-      .filter(Boolean)
-  );
-  if (notes && typeof notes === 'string') {
-    notes.split(',').map(s => s.trim()).filter(Boolean).forEach(x => desc.add(x));
-  }
-
+  // (We keep notes optional/empty to avoid noisy clutter)
   car.checklist = [...checklist];
-  car.description = [...desc].join(', ');
   await car.save();
 
   audit.write(tctx, 'vision.enrich', {
-    summary: `car:${car.rego} +inspect:${inspect.length} desc:${car.description ? 1 : 0}`,
-    out: { description: car.description, checklistSample: car.checklist.slice(0, 20) }
+    summary: `car:${car.rego} +inspect:${inspect.length}`,
+    out: { checklistSample: car.checklist.slice(0, 20) }
   });
 
   return { car, features, colours, damages, inspect };
 }
 
-/* ------------------------------- convenience ------------------------------ */
-
+/* Convenience: run + persist */
 async function analyzeAndEnrichByS3Key({ carId, key, caption = '' }, tctx) {
   const r = await analyzeCarS3Key({ key, caption }, tctx);
   return enrichCarWithFindings({

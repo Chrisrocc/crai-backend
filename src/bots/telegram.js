@@ -244,7 +244,7 @@ bot.on('photo', async (ctx) => {
 
     const veh = await analyzeImageVehicle({ base64, mimeType });
 
-    // ✅ NEW STEP — always ensure car exists before anything else
+    // ✅ ensure car exists if detected
     if (veh.rego && (veh.make || veh.model)) {
       await ensureCarForAction({
         rego: veh.rego,
@@ -258,36 +258,15 @@ bot.on('photo', async (ctx) => {
       console.log(`✅ Ensured car exists: ${veh.rego} (${veh.make} ${veh.model})`);
     }
 
-    // Run resolver after creation
-    let correctedRego = veh.rego;
-    try {
-      const RAW_BASE = process.env.BACKEND_URL || 'http://localhost:5000';
-      const base = RAW_BASE.replace(/\/+$/, '');
-      const apiBase = /\/api\/?$/.test(base) ? base : `${base}/api`;
-
-      const rresp = await fetch(`${apiBase}/cars/resolve-rego`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          regoOCR: veh.rego,
-          make: veh.make,
-          model: veh.model,
-          color: veh.color,
-          ocrConfidence: veh.confidence || 0.9,
-          apply: true,
-        }),
-      });
-      if (rresp.ok) {
-        const rjson = await rresp.json();
-        const r = rjson?.data || {};
-        if (r.action === 'auto-fix' && r.best?.rego) correctedRego = r.best.rego;
-      }
-    } catch (err) {
-      console.warn('resolve-rego error:', err.message);
+    // 🔧 Fix: construct analysis line correctly for both car & non-car photos
+    let analysis = '';
+    if (veh.analysis && !veh.make && !veh.model && !veh.rego) {
+      analysis = `Photo analysis: ${veh.analysis}`;
+    } else {
+      const desc = [veh.make, veh.model, veh.colorDescription].filter(Boolean).join(' ');
+      analysis = `Photo analysis: ${desc}${veh.rego ? `, rego ${veh.rego}` : ''}${veh.analysis ? ` — ${veh.analysis}` : ''}`;
     }
 
-    const desc = [veh.make, veh.model, veh.color].filter(Boolean).join(' ');
-    const analysis = `Photo analysis: ${desc} Rego ${correctedRego}`;
     const ok = batcher.updateMessage(ctx.chat.id, key, analysis);
 
     const cap = (ctx.message.caption || '').trim();

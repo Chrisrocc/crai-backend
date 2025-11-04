@@ -23,27 +23,21 @@ const xai = (XAI_API_KEY && OpenAI)
 function extractJson(s) {
   if (!s) return {};
   const m = String(s).match(/{[\s\S]*}/);
-  try {
-    return m ? JSON.parse(m[0]) : JSON.parse(s);
-  } catch {
-    return {};
-  }
+  try { return m ? JSON.parse(m[0]) : JSON.parse(s); } catch { return {}; }
 }
 
 // ---------- Gemini REST generate ----------
 async function geminiGenerate(parts, genCfg = {}) {
   if (!GOOGLE_API_KEY) return '';
   const url = `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(GOOGLE_API_KEY)}`;
-
   const resp = await fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      contents: [{ parts }], // ✅ fixed: remove role:user, ensures Gemini sees the image
+      contents: [{ role: 'user', parts }],
       generationConfig: genCfg,
-    }),
+    })
   });
-
   if (!resp.ok) {
     const t = await resp.text();
     console.warn(`Gemini REST ${resp.status}: ${t.slice(0, 400)}`);
@@ -87,64 +81,66 @@ async function analyzeImageVehicle({ base64, mimeType }) {
   const allowed = new Set(['image/jpeg', 'image/png', 'image/webp']);
   if (!allowed.has(mimeType)) mimeType = 'image/jpeg';
 
-  if (!base64 || base64.length < 1000) {
-    console.warn('⚠️ Gemini skipped: image base64 too short or missing');
-    return { make: '', model: '', rego: '', colorDescription: '', analysis: '' };
-  }
-
+  // 🔍 Improved prompt to correctly handle both car and non-car photos
   const prompt = `You are analyzing a photo sent in a car yard business chat.
 Return ONLY minified JSON:
 {"make":"","model":"","rego":"","colorDescription":"","analysis":""}
 
-Rules:
-- If the photo clearly shows a vehicle:
-  - Fill "make", "model", "rego", and "colorDescription" (e.g., "white ute with canopy", "black hatchback").
-  - "rego" must be uppercase with no spaces (e.g., "XYZ789"). If unclear, "".
-  - "analysis" should briefly describe the photo (e.g., "front bumper dent", "at Haytham's", "muddy", "needs wash").
-- If the photo does NOT clearly show a vehicle (e.g., oil, parts, dash lights, tools, wheels):
-  - Leave make/model/rego/colorDescription empty.
-  - "analysis" should describe what it shows, short but specific:
-    Examples:
-    - "oil leak on floor under engine bay"
-    - "fluid leak beneath front end"
-    - "check engine light illuminated"
-    - "dashboard light visible but unclear"
-    - "set of alloy wheels"
-    - "front bumper removed"
-    - "engine part possibly turbocharger"
-    - "pile of spare parts on floor"
-- Always return valid minified JSON with exactly these 5 keys.
-- Never include explanatory text outside JSON.`;
+Step 1 — Decide: is this photo clearly showing a vehicle (whole or partial)?
+- If YES, extract the visible vehicle details.
+- If NO, describe what is shown in "analysis" only, and leave make/model/rego/colorDescription as "".
 
-  let raw = '';
-  try {
-    raw = await geminiGenerate(
-      [
-        { inlineData: { mimeType, data: base64 } },
-        { text: prompt },
-      ],
-      { temperature: 0.2 }
-    );
-  } catch (e) {
-    console.warn('⚠️ Gemini request failed:', e.message);
-    return { make: '', model: '', rego: '', colorDescription: '', analysis: '' };
+Rules:
+- If vehicle detected:
+  - "make" and "model" must be readable manufacturer/model (e.g., Toyota Corolla).
+  - "rego" must be the license plate in uppercase, no spaces. If unreadable, "".
+  - "colorDescription" is a short description like "white ute with canopy" or "black hatchback".
+  - "analysis" is a short condition note (e.g., "front bumper dent", "at Haytham's", "muddy", "needs wash").
+- If NOT a vehicle:
+  - "make","model","rego","colorDescription" must stay "".
+  - "analysis" must clearly describe the subject, short and specific:
+    Examples:
+      - "oil leak on floor under engine bay"
+      - "engine oil puddle"
+      - "check engine light illuminated"
+      - "dashboard light visible but unclear"
+      - "pile of spare parts"
+      - "wheel rim with damage"
+      - "removed bumper"
+      - "engine bay close-up"
+      - "tool box and parts on floor"
+- Never output placeholder words like "Rego" or "None". If unsure, use "".
+- Always return valid JSON with exactly these 5 keys.`;
+
+  // ensure non-empty photo
+  if (!base64 || base64.length < 50000) {
+    console.warn('⚠️ Image too short, skipping Gemini photo analysis');
+    return { make:'', model:'', rego:'', colorDescription:'', analysis:'no image detected' };
   }
 
+  const raw = await geminiGenerate(
+    [{ inlineData: { data: base64, mimeType } }, { text: prompt }],
+    {}
+  );
+
   if (!raw) {
-    console.warn('⚠️ Gemini returned empty response');
     return { make: '', model: '', rego: '', colorDescription: '', analysis: '' };
   }
 
   const obj = extractJson(raw) || {};
   const parsed = VehicleSchema.safeParse(obj);
-
   if (!parsed.success) {
-    console.warn('⚠️ Gemini returned invalid JSON:', raw);
     return { make: '', model: '', rego: '', colorDescription: '', analysis: '' };
   }
 
   const out = parsed.data;
   out.rego = (out.rego || '').replace(/\s+/g, '').toUpperCase();
+
+  // sanity fix: prevent nonsense "Rego" placeholder
+  if (out.rego === 'REGO') out.rego = '';
+  if (/^rego$/i.test(out.make)) out.make = '';
+  if (/^rego$/i.test(out.model)) out.model = '';
+
   return out;
 }
 

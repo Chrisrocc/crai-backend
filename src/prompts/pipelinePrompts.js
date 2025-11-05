@@ -1,5 +1,3 @@
-// src/prompts/pipelinePrompts.js
-
 // =======================
 // Step 0: Photo Merger (attach photo analyses logically to text)
 // =======================
@@ -137,14 +135,14 @@ Style rules (examples condensed):
    - "Order a relay for the GTI AC"
 
 3) Preserve directional and intent context:
-   - "On my way to pick up Volvo from Maher going to Essendon from there"
-     → "Christian is picking up the Volvo from Maher and going to Essendon"
-   - "Lets fix the pajero brake lights and indicator light i fixed the horn already"
-     → "Fix Pajero brake lights and indicator lights. Horn is fixed"
+   - "I am taking the Colorado from Capital to Louie and coming back in the Triton"
+   Output:
+   - "Christian is taking the Colorado from Capital to Louie"
+   - "Christian is coming back in the Triton from Louie"
 
 4) Reflect actor intent:
    - "Sam: I will pick up the Outlander at MMM"
-     → "Sam will pick up the Outlander at MMM"
+   → "Sam will pick up the Outlander at MMM"
 
 5) Split to minimal actionable lines:
    - "Haytham has the XR6 and Hilux ready. Let's take them to Imad for the Ranger. Take the Ranger to Al's"
@@ -395,7 +393,7 @@ Field requirements (ORDER MATTERS):
 - make: Proper Case, "" if unknown (infer from model if unambiguous).
 - model: Proper Case or common formatting (e.g., "i30", "BT-50").
 - badge: series/variant if present (e.g., "SR5", "XLT", "GX", "ST-L"), else "".
-- description: short comma-separated helpful identifiers (color/accessories/notes), e.g., "white, bulbar, roof racks". "" if none.
+- description: *COLORS/ACCESSORIES ONLY* (e.g., "white, bulbar, roof racks"). **Do NOT include repairs, locations, people, or tasks.**
 - year: 4-digit if present, else "".
 
 Always place identification fields first in the object in this exact order:

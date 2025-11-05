@@ -1,4 +1,3 @@
-// src/services/updaters/carUpdater.js
 const Car = require('../../models/Car');
 
 // ---------- shared helpers ----------
@@ -20,6 +19,8 @@ const daysClosed = (start, end) => {
 };
 
 // ✅ Loosened: create minimal car if rego + (make OR model)
+// ❗️IMPORTANT: Do NOT copy LLM `description` here — it often contains tasks/locations.
+// Leave description empty at creation; enrich later (UI or vision enrichment).
 async function maybeCreateMinimalCarFromAction(a) {
   const rego = normalizeRego(a.rego || '');
   const make = normalize(a.make || '');
@@ -39,7 +40,8 @@ async function maybeCreateMinimalCarFromAction(a) {
     badge: normalize(a.badge || ''),
     series: '',
     year: String(a.year || '').trim() ? Number(a.year) : undefined,
-    description: normalize(a.description || ''),
+    // ⬇️ key change: never seed description from action payload
+    description: '',
     checklist: [],
     location: '',
     nextLocations: [],

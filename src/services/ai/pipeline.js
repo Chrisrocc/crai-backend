@@ -1,4 +1,3 @@
-// src/services/ai/pipeline.js
 const { z } = require('zod');
 const { chatJSON } = require('./llmClient');
 const P = require('../../prompts/pipelinePrompts');
@@ -199,7 +198,7 @@ async function filterRefineCategorize(batch, tctx) {
   }
   const reconKeywordsList = buildReconKeywordsFlat(cats); // flat bullet list for system
   const categorizeSystem = reconKeywordsList
-    ? P.CATEGORIZE_SYSTEM_DYNAMIC(reconKeywordsList)
+    ? P.CATEGORIZE_SYSTEM_DYNAMIC(reconKeywordsList) // extra arg is harmless if function ignores it
     : P.CATEGORIZE_SYSTEM;
 
   const c = CatOut.parse(
@@ -215,6 +214,7 @@ async function filterRefineCategorize(batch, tctx) {
 
 /**
  * Step 4: Extraction (per category → extractor prompt)
+ * Includes deterministic splitters so mixed lines ALWAYS yield location + checklist.
  */
 async function extractActions(items, tctx) {
   const by = {
@@ -230,21 +230,63 @@ async function extractActions(items, tctx) {
     OTHER: [],
   };
 
-  for (const it of items) {
-    (by[it.category] || by.OTHER).push(it);
-  }
+  for (const it of items) (by[it.category] || by.OTHER).push(it);
 
   const actions = [];
 
+  // ---------- Deterministic splitters (LLM fallback guard) ----------
+  const idFieldsFromText = (_txt) => {
+    // keep empty; LLM extractors will populate rich id fields
+    return { rego: '', make: '', model: '', badge: '', description: '', year: '' };
+  };
+
+  const addSyntheticFrom = (it) => {
+    const text = String(it.text || '');
+
+    // 1) at / @ <place>  → LOCATION_UPDATE
+    const locMatch = text.match(/\b(?:at|@)\s+([A-Za-z][\w'&.\-\s]{1,40})\b/);
+    if (locMatch) {
+      actions.push({
+        type: 'LOCATION_UPDATE',
+        ...idFieldsFromText(text),
+        location: locMatch[1].trim(),
+      });
+    }
+
+    // 2) needs / need / fix / replace / paint / respray → REPAIR(checklist)
+    const repMatch = text.match(/\b(?:needs?|need|fix|replace|paint|respray)\s+([^.;,\n]+)(?:[.;,\n]|$)/i);
+    if (repMatch) {
+      const raw = repMatch[0]
+        .replace(/^is\s+located.*$/i, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      let item = raw;
+      item = item.replace(/^\b(?:needs?|need)\b\s*/i, '');
+      item = item.replace(/^\b(?:to\s+)?(?:be\s+)?(?:fix|replace|paint|respray)\b\s*/i, (m) => m.toLowerCase());
+      item = item.replace(/\s+and\s*$/i, '').trim();
+
+      if (item) {
+        actions.push({
+          type: 'REPAIR',
+          ...idFieldsFromText(text),
+          checklistItem: item,
+        });
+      }
+    }
+  };
+
+  // Ensure we synthesize for both categories, since a single line can be both
+  for (const it of [...by.REPAIR, ...by.LOCATION_UPDATE]) addSyntheticFrom(it);
+
+  // ---------- LLM extractors (as before) ----------
   async function run(cat, sys, label) {
-    const user = by[cat].map((i) => `${i.speaker}: '${i.text}'`).join('\n');
+    const user = (by[cat] || []).map((i) => `${i.speaker}: '${i.text}'`).join('\n');
     if (!user) return;
     const raw = await chatJSON({ system: sys, user });
     timeline.recordExtract(tctx, label, raw);
     const parsed = ActionsOut.safeParse(raw);
-    if (parsed.success) {
-      actions.push(...parsed.data.actions);
-    }
+    if (parsed.success) actions.push(...parsed.data.actions);
   }
 
   await run('LOCATION_UPDATE', P.EXTRACT_LOCATION_UPDATE, 'location_update');
@@ -254,7 +296,6 @@ async function extractActions(items, tctx) {
   await run('DROP_OFF', P.EXTRACT_DROP_OFF, 'drop_off');
   await run('CUSTOMER_APPOINTMENT', P.EXTRACT_CUSTOMER_APPOINTMENT, 'customer_appointment');
 
-  // ---- DB-driven RECON extractor (NO hard-coded heuristics) ----
   if (by.RECON_APPOINTMENT.length > 0) {
     let cats = [];
     try {
@@ -274,12 +315,23 @@ async function extractActions(items, tctx) {
   await run('TASK', P.EXTRACT_TASK, 'task');
 
   // Normalize rego to UPPERCASE/no spaces
+  for (const a of actions) if ('rego' in a && a.rego) a.rego = a.rego.replace(/\s+/g, '').toUpperCase();
+
+  // De-dup key actions so we don't apply twice
+  const seen = new Set();
+  const deduped = [];
   for (const a of actions) {
-    if ('rego' in a && a.rego) a.rego = a.rego.replace(/\s+/g, '').toUpperCase();
+    const sig =
+      a.type === 'LOCATION_UPDATE' ? `${a.type}|${a.rego}|${a.location||''}` :
+      a.type === 'REPAIR'         ? `${a.type}|${a.rego}|${a.checklistItem||''}` :
+      a.type === 'NEXT_LOCATION'  ? `${a.type}|${a.rego}|${a.nextLocation||''}` :
+      a.type === 'TASK'           ? `${a.type}|${a.task||''}` :
+      `${a.type}|${a.rego}|${a.make}|${a.model}`;
+    if (!seen.has(sig)) { seen.add(sig); deduped.push(a); }
   }
 
-  timeline.recordExtractAll(tctx, actions);
-  return actions;
+  timeline.recordExtractAll(tctx, deduped);
+  return deduped;
 }
 
 /**

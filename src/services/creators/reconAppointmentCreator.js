@@ -79,13 +79,21 @@ async function createReconditionerAppointment(payload, tctx) {
     timeline.identFail(tctx, { reason: err.message, rego, make, model });
   }
 
+  // Infer provider name from notes/service if missing (e.g., "at Al's")
+  let provider = (name || '').trim();
+  if (!provider) {
+    const text = [service, notes, description].filter(Boolean).join(' ');
+    const m = text.match(/\b(?:at|@)\s+([A-Za-z][\w'&.\-\s]{1,40})\b/);
+    if (m) provider = m[1].trim();
+  }
+
   const entryNotes = notes || service || '';
   const carEntry = linkedCar
     ? { car: linkedCar._id, notes: entryNotes }
     : { carText: buildCarText({ rego, make, model, badge, description, year }), notes: entryNotes };
 
   const appointment = new ReconditionerAppointment({
-    name: name || 'Reconditioning',
+    name: provider || 'Reconditioning',
     dateTime: dateTime || '',
     category: categoryId,
     cars: [carEntry],

@@ -1,4 +1,3 @@
-// src/bots/telegram.js
 require('dotenv').config();
 const { Telegraf } = require('telegraf');
 
@@ -87,6 +86,24 @@ const batcher = new Batcher({
   onFlush: async (chatId, messages) => {
     const tctx = timeline.newContext({ chatId });
     const { actions } = await processBatch(messages, tctx);
+
+    // --- Fill missing RECON_APPOINTMENT.name from same batch LOCATION_UPDATE ---
+    // If we saw "at Al's" for a rego, and a recon action didn't specify a provider name,
+    // set its name to that location so the appointment shows Al's instead of the sender.
+    {
+      const lastLocByRego = new Map();
+      for (const a of actions) {
+        if (a.type === 'LOCATION_UPDATE' && a.rego && a.location) {
+          lastLocByRego.set(a.rego, a.location);
+        }
+      }
+      for (const a of actions) {
+        if (a.type === 'RECON_APPOINTMENT' && (!a.name || !a.name.trim())) {
+          const guess = a.rego ? lastLocByRego.get(a.rego) : '';
+          if (guess) a.name = guess;
+        }
+      }
+    }
 
     const out = [];
     for (const a of actions) {

@@ -1,7 +1,10 @@
-// src/services/updaters/carUpdater.js
 const Car = require('../../models/Car');
+const { matchRego } = require('../matching/regoMatcher');
+const timeline = require('../logging/timelineLogger');
 
-// ---------- shared helpers ----------
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
 const normalize = (s) => String(s || '').trim();
 const normalizeRego = (s) =>
   typeof s === 'string' ? s.toUpperCase().replace(/[^A-Z0-9]/g, '') : s;
@@ -19,158 +22,193 @@ const daysClosed = (start, end) => {
   return Math.max(1, Math.floor(diff / msPerDay));
 };
 
-// ✅ Loosened: create minimal car if rego + (make OR model)
-async function maybeCreateMinimalCarFromAction(a) {
-  const rego = normalizeRego(a.rego || '');
-  const make = normalize(a.make || '');
-  const model = normalize(a.model || '');
+// ---------------------------------------------------------------------------
+// LOCATION UPDATE
+// ---------------------------------------------------------------------------
+async function applyLocationUpdate(a, tctx) {
+  const rego = normalizeRego(a.rego);
+  const newLoc = normalize(a.location);
+  if (!rego || !newLoc) throw new Error('Missing rego or location');
 
-  if (!rego) return null;
-  if (!make && !model) return null;
+  const car = await Car.findOne({ rego: new RegExp(`^${rego}$`, 'i') });
+  if (!car) throw new Error(`Car ${rego} not found`);
 
-  // If another car already has this rego (case-insensitive), return that instead
-  const existingByRego = await Car.findOne({ rego: new RegExp(`^${rego}$`, 'i') });
-  if (existingByRego) return existingByRego;
-
-  const doc = new Car({
-    rego,
-    make,
-    model,
-    badge: normalize(a.badge || ''),
-    series: '',
-    year: String(a.year || '').trim() ? Number(a.year) : undefined,
-    description: normalize(a.description || ''),
-    checklist: [],
-    location: '',
-    nextLocations: [],
-    history: [],
-    readinessStatus: '',
-    stage: 'In Works',
-    notes: '',
-  });
-
-  try {
-    await doc.save();
-    console.log(`✅ Created minimal car: ${rego} (${make} ${model})`);
-    return doc;
-  } catch (e) {
-    if (e && e.code === 11000) {
-      const fallback = await Car.findOne({ rego: new RegExp(`^${rego}$`, 'i') });
-      if (fallback) return fallback;
-    }
-    throw e;
-  }
-}
-
-async function findCarByAction(a) {
-  if (a.rego) {
-    const byRego = await Car.findOne({ rego: normalizeRego(a.rego) });
-    if (byRego) return byRego;
-  }
-  if (a.make && a.model) {
-    const byBoth = await Car.findOne({
-      make: new RegExp(`^${a.make}$`, 'i'),
-      model: new RegExp(`^${a.model}$`, 'i'),
-    });
-    if (byBoth) return byBoth;
-  }
-  if (a.model) {
-    const byModel = await Car.findOne({ model: new RegExp(`^${a.model}$`, 'i') });
-    if (byModel) return byModel;
-  }
-  return null;
-}
-
-async function ensureCarForAction(a) {
-  const found = await findCarByAction(a);
-  if (found) return found;
-
-  const created = await maybeCreateMinimalCarFromAction(a);
-  if (created) return created;
-
-  throw new Error('No cars match specified make+model.');
-}
-
-const pushNextLocation = (car, v) => {
-  const value = String(v || '').trim();
-  if (!value) return;
-  if (!Array.isArray(car.nextLocations)) car.nextLocations = [];
-  if (!car.nextLocations.includes(value)) car.nextLocations.push(value);
-};
-
-const updateLocationWithHistory = (car, newLoc) => {
-  const next = String(newLoc || '').trim();
   const prev = car.location || '';
-
-  if (next && next !== prev) {
-    if (Array.isArray(car.history) && car.history.length) {
-      const last = car.history[car.history.length - 1];
-      if (last && !last.endDate) {
-        last.endDate = new Date();
-        last.days = daysClosed(last.startDate, last.endDate);
-      }
-    } else car.history = [];
-
-    car.history.push({ location: next, startDate: new Date(), endDate: null, days: 0 });
-    car.location = next;
-  } else if (!prev && next) {
-    if (!Array.isArray(car.history)) car.history = [];
-    car.history.push({ location: next, startDate: new Date(), endDate: null, days: 0 });
-    car.location = next;
-  } else if (!next && prev) {
-    if (Array.isArray(car.history) && car.history.length) {
-      const last = car.history[car.history.length - 1];
-      if (last && !last.endDate) {
-        last.endDate = new Date();
-        last.days = daysClosed(last.startDate, last.endDate);
-      }
-    }
-    car.location = '';
+  if (prev === newLoc) {
+    return { changed: false, car };
   }
-};
 
-// ---------- exported updaters ----------
-async function applyLocationUpdate(a /*, tctx */) {
-  const car = await ensureCarForAction(a);
-  const previousLocation = car.location || '';
-  updateLocationWithHistory(car, a.location || '');
+  // close old history entry
+  if (Array.isArray(car.history) && car.history.length) {
+    const last = car.history[car.history.length - 1];
+    if (last && !last.endDate) {
+      last.endDate = new Date();
+      last.days = daysClosed(last.startDate, last.endDate);
+    }
+  } else {
+    car.history = [];
+  }
+
+  car.history.push({
+    location: newLoc,
+    startDate: new Date(),
+    endDate: null,
+    days: 0,
+  });
+  car.location = newLoc;
   await car.save();
-  return { changed: previousLocation !== car.location, car, previousLocation };
+
+  if (tctx) timeline.location(tctx, `${rego}: ${prev || '-'} → ${newLoc}`);
+  return { changed: true, car, previousLocation: prev };
 }
 
-async function applySold(a /*, tctx */) {
-  const car = await ensureCarForAction(a);
-  const was = car.stage || '';
+// ---------------------------------------------------------------------------
+// SOLD
+// ---------------------------------------------------------------------------
+async function applySold(a, tctx) {
+  const rego = normalizeRego(a.rego);
+  if (!rego) throw new Error('Missing rego');
+
+  const car = await Car.findOne({ rego: new RegExp(`^${rego}$`, 'i') });
+  if (!car) throw new Error(`Car ${rego} not found`);
+
+  if (car.stage === 'Sold') {
+    return { changed: false, car };
+  }
+
   car.stage = 'Sold';
   await car.save();
-  return { changed: was !== 'Sold', car };
+
+  if (tctx) timeline.stage(tctx, `${rego}: marked Sold`);
+  return { changed: true, car };
 }
 
-async function addChecklistItem(a /*, tctx */) {
-  const car = await ensureCarForAction(a);
-  const item = (a.checklistItem || '').trim();
-  if (!item) throw new Error('Checklist item is empty');
-  if (!Array.isArray(car.checklist)) car.checklist = [];
-  if (!car.checklist.includes(item)) car.checklist.push(item);
+// ---------------------------------------------------------------------------
+// CHECKLIST ITEM / REPAIR
+// ---------------------------------------------------------------------------
+async function addChecklistItem(a, tctx) {
+  const rego = normalizeRego(a.rego);
+  if (!rego || !a.checklistItem) throw new Error('Missing rego or checklist item');
+
+  const car = await Car.findOne({ rego: new RegExp(`^${rego}$`, 'i') });
+  if (!car) throw new Error(`Car ${rego} not found`);
+
+  const item = String(a.checklistItem).trim();
+  if (!item) throw new Error('Empty checklist item');
+
+  const checklist = Array.isArray(car.checklist) ? car.checklist : [];
+  if (!checklist.includes(item)) checklist.push(item);
+
+  car.checklist = checklist;
   await car.save();
+
+  if (tctx) timeline.repair(tctx, `${rego}: + ${item}`);
   return { car, item };
 }
 
-async function setReadinessStatus(a /*, tctx */) {
-  const car = await ensureCarForAction(a);
-  const prev = car.readinessStatus || '';
-  const next = (a.readiness || '').trim() || 'Ready';
-  car.readinessStatus = next;
+// ---------------------------------------------------------------------------
+// READINESS
+// ---------------------------------------------------------------------------
+async function setReadinessStatus(a, tctx) {
+  const rego = normalizeRego(a.rego);
+  const readiness = normalize(a.readiness);
+  if (!rego) throw new Error('Missing rego');
+
+  const car = await Car.findOne({ rego: new RegExp(`^${rego}$`, 'i') });
+  if (!car) throw new Error(`Car ${rego} not found`);
+
+  car.readinessStatus = readiness;
   await car.save();
-  return { car, readiness: next, previous: prev };
+
+  if (tctx) timeline.ready(tctx, `${rego}: readiness → ${readiness}`);
+  return { car, readiness };
 }
 
-async function setNextLocation(a /*, tctx */) {
-  const car = await ensureCarForAction(a);
-  const nl = (a.nextLocation || '').trim();
-  if (nl) pushNextLocation(car, nl);
+// ---------------------------------------------------------------------------
+// NEXT LOCATION
+// ---------------------------------------------------------------------------
+async function setNextLocation(a, tctx) {
+  const rego = normalizeRego(a.rego);
+  const nextLoc = normalize(a.nextLocation);
+  if (!rego || !nextLoc) throw new Error('Missing rego or next location');
+
+  const car = await Car.findOne({ rego: new RegExp(`^${rego}$`, 'i') });
+  if (!car) throw new Error(`Car ${rego} not found`);
+
+  const nexts = Array.isArray(car.nextLocations) ? car.nextLocations : [];
+  if (!nexts.includes(nextLoc)) nexts.push(nextLoc);
+  car.nextLocations = nexts;
   await car.save();
-  return { car, nextLocation: nl };
+
+  if (tctx) timeline.nextLocation(tctx, `${rego}: next → ${nextLoc}`);
+  return { car, nextLoc };
+}
+
+// ---------------------------------------------------------------------------
+// ENSURE CAR EXISTS (auto-create + fuzzy match)
+// ---------------------------------------------------------------------------
+async function ensureCarForAction(base = {}, tctx = null) {
+  const rego = (base.rego || '').toUpperCase().replace(/\s+/g, '');
+  const make = (base.make || '').trim();
+  const model = (base.model || '').trim();
+  const color =
+    (base.color || '').trim() ||
+    (base.description || '').split(',')[0]?.trim() ||
+    '';
+  const year = base.year || '';
+  const badge = base.badge || '';
+  const desc = base.description || '';
+
+  if (!rego && !make && !model) {
+    throw new Error('Insufficient info: need rego or make+model');
+  }
+
+  // 1️⃣ Exact rego match
+  let car = await Car.findOne({ rego: new RegExp(`^${rego}$`, 'i') });
+  if (car) {
+    if (tctx) timeline.ensureCar(tctx, `found existing car ${rego}`);
+    return car;
+  }
+
+  // 2️⃣ Fuzzy rego match (using make/model/color)
+  const fuzzy = await matchRego({
+    ocrRego: rego,
+    make,
+    model,
+    color,
+    year,
+    ocrConfidence: 0.9,
+  });
+
+  if (fuzzy.action === 'auto-fix' && fuzzy.best?.car?._id) {
+    car = await Car.findById(fuzzy.best.car._id);
+    if (car) {
+      if (tctx) timeline.ensureCar(tctx, `fuzzy matched ${rego} → ${car.rego}`);
+      return car;
+    }
+  }
+
+  // 3️⃣ Create new car if none found
+  const newCar = new Car({
+    rego,
+    make,
+    model,
+    badge,
+    year,
+    color,
+    description: desc || color,
+    location: '',
+    stage: 'In Works',
+    readinessStatus: '',
+    nextLocations: [],
+    checklist: [],
+    history: [],
+    notes: '',
+  });
+
+  await newCar.save();
+  if (tctx) timeline.ensureCar(tctx, `created new car ${rego} (${make} ${model})`);
+  return newCar;
 }
 
 module.exports = {

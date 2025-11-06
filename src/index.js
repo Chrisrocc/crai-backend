@@ -1,3 +1,4 @@
+// src/index.js
 require("dotenv").config();
 
 const express = require("express");
@@ -23,7 +24,7 @@ const requireAuth = require("./middleware/requireAuth");
 // Public controller for rego resolution (no auth)
 const { resolveRegoController } = require("./routes/cars");
 
-// Telegram (do NOT launch here; we decide polling vs webhook below)
+// Telegram (webhook or polling)
 let bot = null;
 try {
   ({ bot } = require("./bots/telegram"));
@@ -34,7 +35,7 @@ try {
 const app = express();
 const port = process.env.PORT || 5000;
 
-// Trust proxy so secure cookies work behind proxies (Railway/CF/Render)
+// Trust proxy (so secure cookies work behind Render/CF/Railway)
 app.set("trust proxy", 1);
 
 /* --------------------------  C O R S  -------------------------- */
@@ -73,12 +74,14 @@ app.use((req, res, next) => {
 });
 /* --------------------------------------------------------------- */
 
-// Body + cookies
-app.use(express.json({ limit: "5mb" }));
-app.use(express.urlencoded({ extended: true }));
+/* -----------------  Body parser + cookies ----------------- */
+// 📸 Raised to 25 MB to support mobile photo uploads
+app.use(express.json({ limit: "25mb" }));
+app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 app.use(cookieParser());
+/* ---------------------------------------------------------- */
 
-// Quick cookie/auth debug (PUBLIC)
+// Debug cookie/auth info (PUBLIC)
 app.get("/api/auth/debug-cookie", (req, res) => {
   res.json({
     origin: req.headers.origin || null,
@@ -88,13 +91,13 @@ app.get("/api/auth/debug-cookie", (req, res) => {
   });
 });
 
-// Health (PUBLIC)
+// Health check (PUBLIC)
 app.get("/ping", (_req, res) => res.json({ ok: true, t: Date.now() }));
 
 // --- PUBLIC AUTH ROUTES ---
 app.use("/api/auth", authRoutes);
 
-/* -------------------- TELEGRAM WEBHOOK (PUBLIC) -------------------- */
+/* ---------------- TELEGRAM WEBHOOK (PUBLIC) ---------------- */
 const TG_WEBHOOK_PATH = "/telegram/webhook";
 const TG_WEBHOOK_DOMAIN = process.env.TELEGRAM_WEBHOOK_DOMAIN || ""; // e.g. crai-backend-production.up.railway.app
 let stopTelegram = null;
@@ -113,17 +116,13 @@ if (bot) {
     }
   );
 }
-// -------------------------------------------------------------------
+/* ------------------------------------------------------------ */
 
-/* ------------------- PUBLIC: resolve-rego route ------------------- */
-/**
- * NOTE: This must come BEFORE the auth-protected /api/cars routes,
- * otherwise the bot (no cookies) will get 401.
- */
+/* -------- PUBLIC: resolve-rego (must be before auth) -------- */
 app.post("/api/cars/resolve-rego", resolveRegoController);
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------ */
 
-// --- PROTECTED ROUTES ---
+/* -------------------- PROTECTED ROUTES ---------------------- */
 app.use("/api/cars", requireAuth, carsRouter);
 app.use("/api/customer-appointments", requireAuth, customerAppointmentsRouter);
 app.use("/api/reconditioner-categories", requireAuth, reconditionerCategoriesRouter);
@@ -133,11 +132,12 @@ app.use("/api/photos", requireAuth, photoRoutes);
 app.use("/api/recon", requireAuth, reconIngestRoutes);
 app.use("/api/cars", requireAuth, carImportRouter);
 app.use("/api/cars", requireAuth, autogateSyncRoutes);
+/* ------------------------------------------------------------ */
 
 // Root
 app.get("/", (_req, res) => res.json({ message: "Welcome to CRAI Backend" }));
 
-// 404
+// 404 fallback
 app.use((req, res) => res.status(404).json({ message: "Not Found" }));
 
 // Error handler
@@ -146,20 +146,22 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ message: "Server error", error: err.message });
 });
 
+/* ------------------------ Startup -------------------------- */
 async function start() {
   let server;
   try {
     await mongoose.connect(process.env.MONGO_URI);
-    console.log("Connected to MongoDB");
+    console.log("✅ Connected to MongoDB");
 
     server = app.listen(port, () => {
-      console.log(`Backend running on http://localhost:${port}`);
+      console.log(`🚀 Backend running on http://localhost:${port}`);
       console.log("CORS explicit FRONTEND_URLs:", FRONTEND_URLS);
       console.log(
         `CORS Pages host allowed: ${BASE_PAGES_HOST} and all *.${BASE_PAGES_HOST}`
       );
     });
 
+    // Telegram setup
     if (bot) {
       if (TG_WEBHOOK_DOMAIN) {
         const url = `https://${TG_WEBHOOK_DOMAIN}${TG_WEBHOOK_PATH}`;
@@ -175,7 +177,7 @@ async function start() {
             }
           };
         } catch (e) {
-          console.error("[telegram] setWebhook failed, falling back to polling:", e.message);
+          console.error("[telegram] setWebhook failed, fallback to polling:", e.message);
           await bot.launch();
           console.log("[telegram] launched in polling mode (fallback)");
           stopTelegram = async () => bot.stop("SIGTERM");
@@ -187,6 +189,7 @@ async function start() {
       }
     }
 
+    // Graceful shutdown
     const shutdown = async (signal) => {
       console.log(`\nReceived ${signal}, shutting down...`);
       try { if (stopTelegram) await stopTelegram(); } catch (e) { console.warn("Telegram stop error:", e.message); }
@@ -194,10 +197,11 @@ async function start() {
       if (server) server.close(() => { console.log("HTTP server closed."); process.exit(0); });
       else process.exit(0);
     };
+
     process.on("SIGINT", () => shutdown("SIGINT"));
     process.on("SIGTERM", () => shutdown("SIGTERM"));
   } catch (err) {
-    console.error("Fatal startup error:", err.message);
+    console.error("❌ Fatal startup error:", err.message);
     process.exit(1);
   }
 }

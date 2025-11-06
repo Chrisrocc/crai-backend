@@ -27,7 +27,6 @@ function robustDecode(val = '') {
   let out = String(val || '');
   try {
     const once = decodeURIComponent(out);
-    // If after one decode we still see %xx, decode again
     out = /%[0-9a-f]{2}/i.test(once) ? decodeURIComponent(once) : once;
   } catch {
     // ignore and use original
@@ -40,8 +39,12 @@ function robustDecode(val = '') {
    ========================================================= */
 router.get('/:carId', async (req, res) => {
   try {
+    console.log(`📸 [GET] Fetching photos for carId=${req.params.carId}`);
     const car = await Car.findById(req.params.carId).lean();
-    if (!car) return res.status(404).json({ message: 'Car not found' });
+    if (!car) {
+      console.warn(`⚠️ [GET] Car not found: ${req.params.carId}`);
+      return res.status(404).json({ message: 'Car not found' });
+    }
 
     const photos = await Promise.all(
       (car.photos || []).map(async (p) => ({
@@ -52,19 +55,22 @@ router.get('/:carId', async (req, res) => {
       }))
     );
 
+    console.log(`✅ [GET] Returned ${photos.length} photos for ${car.rego}`);
     res.json({ message: 'Photos retrieved', data: photos });
   } catch (err) {
+    console.error('❌ [GET] Error getting photos:', err.message);
     res.status(500).json({ message: 'Error getting photos', error: err.message });
   }
 });
 
 /* =========================================================
    POST: create presigned PUT URL for browser upload
-   Body: { carId?: string, rego?: string, filename: string, contentType?: string }
    ========================================================= */
 router.post('/presign', async (req, res) => {
   try {
     const { carId, rego, filename, contentType } = req.body || {};
+    console.log(`🪪 [PRESIGN] carId=${carId || '-'} rego=${rego || '-'} file=${filename}`);
+
     if (!carId && !rego) return res.status(400).json({ message: 'carId or rego is required' });
     if (!filename) return res.status(400).json({ message: 'filename is required' });
 
@@ -74,6 +80,7 @@ router.post('/presign', async (req, res) => {
       contentType: contentType || 'application/octet-stream',
     });
 
+    console.log(`✅ [PRESIGN OK] Key=${key}`);
     res.json({
       message: 'Presigned URL created',
       data: {
@@ -87,60 +94,68 @@ router.post('/presign', async (req, res) => {
       },
     });
   } catch (err) {
+    console.error('❌ [PRESIGN FAIL]', err.message);
     res.status(500).json({ message: 'Error creating presigned URL', error: err.message });
   }
 });
 
 /* =========================================================
    POST: attach uploaded key to car & trigger background enrichment
-   Body: { carId: string, key: string, caption?: string }
    ========================================================= */
 router.post('/attach', async (req, res) => {
   try {
     const { carId, key, caption = '' } = req.body || {};
+    console.log(`🔗 [ATTACH] carId=${carId}, key=${key}`);
+
     if (!carId || !key) return res.status(400).json({ message: 'carId and key are required' });
 
     const car = await Car.findById(carId);
-    if (!car) return res.status(404).json({ message: 'Car not found' });
+    if (!car) {
+      console.warn(`⚠️ [ATTACH FAIL] Car not found for ${carId}`);
+      return res.status(404).json({ message: 'Car not found' });
+    }
 
     const exists = (car.photos || []).some((p) => p.key === key);
     if (!exists) {
       car.photos.push({ key, caption });
       await car.save();
+      console.log(`✅ [ATTACH OK] Added ${key} to ${car.rego}`);
+    } else {
+      console.log(`ℹ️ [ATTACH SKIP] Already attached: ${key}`);
     }
 
     const url = await getSignedViewUrl(key, 3600);
-
-    // Respond immediately so UI can render
     res.status(201).json({
       message: exists ? 'Photo already attached' : 'Photo attached',
       data: { key, caption, url },
     });
 
-    // Background enrichment (tolerant)
+    // Background enrichment
     const tctx = timeline.newContext({ chatId: `upload:${carId}` });
     setImmediate(async () => {
       try {
         await analyzeAndEnrichByS3Key({ carId, key, caption }, tctx);
         timeline.change(tctx, `Enriched ${car.rego} from ${key}`);
       } catch (e) {
-        console.error('vision enrich error:', e.message);
+        console.error('💥 [VISION ENRICH ERROR]', e.message);
       } finally {
         timeline.print(tctx);
       }
     });
   } catch (err) {
+    console.error('❌ [ATTACH ERROR]', err.message);
     res.status(500).json({ message: 'Error attaching photo', error: err.message });
   }
 });
 
 /* =========================================================
-   (Optional) server-side upload: multipart form
-   FormData: file, carId|rego, caption?
+   POST: multipart server-side upload (fallback)
    ========================================================= */
 router.post('/upload', upload.single('file'), async (req, res) => {
   try {
     const { carId, rego, caption = '' } = req.body || {};
+    console.log(`📤 [UPLOAD] carId=${carId || '-'} rego=${rego || '-'} file=${req.file?.originalname}`);
+
     if (!carId && !rego) return res.status(400).json({ message: 'carId or rego is required' });
     if (!req.file) return res.status(400).json({ message: 'file is required' });
 
@@ -150,11 +165,13 @@ router.post('/upload', upload.single('file'), async (req, res) => {
       buffer: req.file.buffer,
       contentType: req.file.mimetype || 'application/octet-stream',
     });
+    console.log(`✅ [UPLOAD OK] Uploaded ${key}`);
 
     let car = null;
     if (carId) car = await Car.findById(carId);
     else if (rego) car = await Car.findOne({ rego: String(rego).trim().toUpperCase() });
     if (!car) {
+      console.warn(`⚠️ [UPLOAD WARN] Uploaded ${key} but no car found`);
       return res.status(404).json({
         message: 'Car not found to attach photo (upload succeeded)',
         data: { key },
@@ -163,6 +180,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
 
     car.photos.push({ key, caption });
     await car.save();
+    console.log(`✅ [UPLOAD ATTACH] ${key} → ${car.rego}`);
 
     const url = await getSignedViewUrl(key, 3600);
     res.status(201).json({ message: 'Photo uploaded and attached', data: { key, caption, url } });
@@ -173,43 +191,50 @@ router.post('/upload', upload.single('file'), async (req, res) => {
         await analyzeAndEnrichByS3Key({ carId: car._id, key, caption }, tctx);
         timeline.change(tctx, `Enriched ${car.rego} from ${key}`);
       } catch (e) {
-        console.error('vision enrich error:', e.message);
+        console.error('💥 [VISION ENRICH ERROR]', e.message);
       } finally {
         timeline.print(tctx);
       }
     });
   } catch (err) {
+    console.error('❌ [UPLOAD FAIL]', err.message);
     res.status(500).json({ message: 'Error uploading photo', error: err.message });
   }
 });
 
 /* =========================================================
    PATCH: update caption
-   Body: { key: string, caption?: string }
    ========================================================= */
 router.patch('/:carId/caption', async (req, res) => {
   try {
     const { key, caption = '' } = req.body || {};
+    console.log(`✏️ [CAPTION] carId=${req.params.carId}, key=${key}`);
     if (!key) return res.status(400).json({ message: 'key is required' });
 
     const car = await Car.findById(req.params.carId);
-    if (!car) return res.status(404).json({ message: 'Car not found' });
+    if (!car) {
+      console.warn(`⚠️ [CAPTION FAIL] Car not found: ${req.params.carId}`);
+      return res.status(404).json({ message: 'Car not found' });
+    }
 
     const p = (car.photos || []).find((x) => x.key === key);
-    if (!p) return res.status(404).json({ message: 'Photo not found on this car' });
+    if (!p) {
+      console.warn(`⚠️ [CAPTION FAIL] Photo not found on car: ${key}`);
+      return res.status(404).json({ message: 'Photo not found on this car' });
+    }
 
     p.caption = caption;
     await car.save();
-
+    console.log(`✅ [CAPTION OK] Updated caption for ${key}`);
     res.json({ message: 'Caption updated', data: { key, caption } });
   } catch (err) {
+    console.error('❌ [CAPTION ERROR]', err.message);
     res.status(500).json({ message: 'Error updating caption', error: err.message });
   }
 });
 
 /* =========================================================
-   DELETE: remove a photo from S3 and the car document
-   Query: ?key=...
+   DELETE: remove photo from S3 and car document
    ========================================================= */
 router.delete('/:carId', async (req, res) => {
   try {
@@ -217,20 +242,24 @@ router.delete('/:carId', async (req, res) => {
     if (!rawKey) return res.status(400).json({ message: 'key query param is required' });
 
     const key = robustDecode(rawKey);
+    console.log(`🗑 [DELETE] carId=${req.params.carId}, key=${key}`);
 
     const car = await Car.findById(req.params.carId);
-    if (!car) return res.status(404).json({ message: 'Car not found' });
+    if (!car) {
+      console.warn(`⚠️ [DELETE FAIL] Car not found: ${req.params.carId}`);
+      return res.status(404).json({ message: 'Car not found' });
+    }
 
-    // Tolerate missing objects (deleteObject will swallow NoSuchKey)
     await deleteObject(key);
-
     const before = (car.photos || []).length;
     car.photos = (car.photos || []).filter((p) => p.key !== key);
     const changed = car.photos.length !== before;
     if (changed) await car.save();
+    console.log(`✅ [DELETE OK] Removed ${key} from ${car.rego}`);
 
     res.json({ message: 'Photo deleted', data: { key, removedFromCar: changed } });
   } catch (err) {
+    console.error('❌ [DELETE ERROR]', err.message);
     res.status(500).json({ message: 'Error deleting photo', error: err.message });
   }
 });

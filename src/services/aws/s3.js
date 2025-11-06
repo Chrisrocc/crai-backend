@@ -104,7 +104,7 @@ async function getSignedViewUrl(key, expiresInSeconds = 3600) {
   return getSignedUrl(s3, cmd, { expiresIn: expiresInSeconds });
 }
 
-async function getPresignedPutUrl({ key, contentType = 'application/octet-stream', expiresInSeconds = 3600 }) {
+async function getPresignedPutUrl({ key, contentType = 'application/octet-stream', expiresInSeconds = 86400 }) {
   requireEnabled();
   const { PutObjectCommand } = require('@aws-sdk/client-s3');
   const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');

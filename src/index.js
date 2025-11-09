@@ -6,10 +6,7 @@ const mongoose = require("mongoose");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
 
-const app = express();
-const port = process.env.PORT || 5000;
-
-/* ----------------------  Routers  ---------------------- */
+// Routers
 const carsRouter = require("./routes/cars");
 const customerAppointmentsRouter = require("./routes/customerAppointments");
 const reconditionerCategoriesRouter = require("./routes/reconditionerCategories");
@@ -17,40 +14,32 @@ const reconditionerAppointmentsRouter = require("./routes/reconditionerAppointme
 const tasksRouter = require("./routes/tasks");
 const photoRoutes = require("./routes/photoRoutes");
 const reconIngestRoutes = require("./routes/reconIngest");
+const carImportRouter = require("./routes/carImport");
+const autogateSyncRoutes = require("./routes/autogateSync");
 
-// Some optional routes might not export a router correctly,
-// so we wrap them defensively:
-function safeRequireRouter(path) {
-  try {
-    const mod = require(path);
-    if (typeof mod === "function" || (mod && typeof mod.use === "function")) return mod;
-    console.warn(`[WARN] ${path} did not export a router function.`);
-    return express.Router();
-  } catch (e) {
-    console.warn(`[WARN] Failed to load ${path}:`, e.message);
-    return express.Router();
-  }
-}
-
-const carImportRouter = safeRequireRouter("./routes/carImport");
-const autogateSyncRoutes = safeRequireRouter("./routes/autogateSync");
-
-/* ----------------------  Auth ---------------------- */
+// Auth
 const authRoutes = require("./routes/auth");
 const requireAuth = require("./middleware/requireAuth");
-const { resolveRegoController } = require("./routes/cars");
 
-/* ----------------------  Telegram ---------------------- */
+// Public controller for rego resolution (no auth)
+const carsModule = require("./routes/cars");
+const resolveRegoController = carsModule.resolveRegoController;
+
+// Telegram (webhook or polling)
 let bot = null;
 try {
   ({ bot } = require("./bots/telegram"));
 } catch (e) {
-  console.warn("[telegram] unavailable:", e.message);
+  console.warn("[telemetry] telegram bot unavailable:", e.message);
 }
 
-/* ----------------------  Setup ---------------------- */
+const app = express();
+const port = process.env.PORT || 5000;
+
+// Trust proxy (so secure cookies work behind Render/CF/Railway)
 app.set("trust proxy", 1);
 
+/* --------------------------  C O R S  -------------------------- */
 const BASE_PAGES_HOST = "crai-frontend.pages.dev";
 const FRONTEND_URLS = (process.env.FRONTEND_URL || "http://localhost:5173")
   .split(",")
@@ -84,12 +73,15 @@ app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
+/* --------------------------------------------------------------- */
 
+/* -----------------  Body parser + cookies ----------------- */
 app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 app.use(cookieParser());
+/* ---------------------------------------------------------- */
 
-/* ----------------------  Public endpoints ---------------------- */
+// Debug cookie/auth info (PUBLIC)
 app.get("/api/auth/debug-cookie", (req, res) => {
   res.json({
     origin: req.headers.origin || null,
@@ -99,10 +91,13 @@ app.get("/api/auth/debug-cookie", (req, res) => {
   });
 });
 
+// Health check (PUBLIC)
 app.get("/ping", (_req, res) => res.json({ ok: true, t: Date.now() }));
+
+// --- PUBLIC AUTH ROUTES ---
 app.use("/api/auth", authRoutes);
 
-/* ----------------------  Telegram webhook ---------------------- */
+/* ---------------- TELEGRAM WEBHOOK (PUBLIC) ---------------- */
 const TG_WEBHOOK_PATH = "/telegram/webhook";
 const TG_WEBHOOK_DOMAIN = process.env.TELEGRAM_WEBHOOK_DOMAIN || "";
 let stopTelegram = null;
@@ -121,11 +116,13 @@ if (bot) {
     }
   );
 }
+/* ------------------------------------------------------------ */
 
-/* ----------------------  Public: Rego Resolver ---------------------- */
+/* -------- PUBLIC: resolve-rego (must be before auth) -------- */
 app.post("/api/cars/resolve-rego", resolveRegoController);
+/* ------------------------------------------------------------ */
 
-/* ----------------------  Protected Routes ---------------------- */
+/* -------------------- PROTECTED ROUTES ---------------------- */
 app.use("/api/cars", requireAuth, carsRouter);
 app.use("/api/customer-appointments", requireAuth, customerAppointmentsRouter);
 app.use("/api/reconditioner-categories", requireAuth, reconditionerCategoriesRouter);
@@ -133,20 +130,23 @@ app.use("/api/reconditioner-appointments", requireAuth, reconditionerAppointment
 app.use("/api/tasks", requireAuth, tasksRouter);
 app.use("/api/photos", requireAuth, photoRoutes);
 app.use("/api/recon", requireAuth, reconIngestRoutes);
-
-// ⚙️ Defensive guards for optional routes
 app.use("/api/cars", requireAuth, carImportRouter);
 app.use("/api/cars", requireAuth, autogateSyncRoutes);
+/* ------------------------------------------------------------ */
 
-/* ----------------------  Root + Errors ---------------------- */
+// Root
 app.get("/", (_req, res) => res.json({ message: "Welcome to CRAI Backend" }));
+
+// 404 fallback
 app.use((req, res) => res.status(404).json({ message: "Not Found" }));
+
+// Error handler
 app.use((err, _req, res, _next) => {
   console.error("Server error:", err.stack || err.message);
   res.status(500).json({ message: "Server error", error: err.message });
 });
 
-/* ----------------------  Startup ---------------------- */
+/* ------------------------ Startup -------------------------- */
 async function start() {
   let server;
   try {
@@ -161,6 +161,7 @@ async function start() {
       );
     });
 
+    // Telegram setup
     if (bot) {
       if (TG_WEBHOOK_DOMAIN) {
         const url = `https://${TG_WEBHOOK_DOMAIN}${TG_WEBHOOK_PATH}`;
@@ -188,6 +189,7 @@ async function start() {
       }
     }
 
+    // Graceful shutdown
     const shutdown = async (signal) => {
       console.log(`\nReceived ${signal}, shutting down...`);
       try { if (stopTelegram) await stopTelegram(); } catch (e) { console.warn("Telegram stop error:", e.message); }

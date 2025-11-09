@@ -21,22 +21,26 @@ const autogateSyncRoutes = require("./routes/autogateSync");
 const authRoutes = require("./routes/auth");
 const requireAuth = require("./middleware/requireAuth");
 
-// Public controller for rego resolution (no auth)
+// ✅ FIX — safely import both router and controller
 const carsModule = require("./routes/cars");
-const resolveRegoController = carsModule.resolveRegoController;
+const resolveRegoController =
+  typeof carsModule.resolveRegoController === "function"
+    ? carsModule.resolveRegoController
+    : (_req, res) =>
+        res.status(500).json({ message: "resolveRegoController missing" });
 
-// Telegram (webhook or polling)
+// Telegram
 let bot = null;
 try {
   ({ bot } = require("./bots/telegram"));
 } catch (e) {
-  console.warn("[telemetry] telegram bot unavailable:", e.message);
+  console.warn("[telegram] unavailable:", e.message);
 }
 
 const app = express();
 const port = process.env.PORT || 5000;
 
-// Trust proxy (so secure cookies work behind Render/CF/Railway)
+// Trust proxy (for Render/Railway)
 app.set("trust proxy", 1);
 
 /* --------------------------  C O R S  -------------------------- */
@@ -75,13 +79,13 @@ app.use((req, res, next) => {
 });
 /* --------------------------------------------------------------- */
 
-/* -----------------  Body parser + cookies ----------------- */
+/* ---------------- Body parser + cookies ---------------- */
 app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 app.use(cookieParser());
-/* ---------------------------------------------------------- */
+/* ------------------------------------------------------- */
 
-// Debug cookie/auth info (PUBLIC)
+// Debug cookie/auth info
 app.get("/api/auth/debug-cookie", (req, res) => {
   res.json({
     origin: req.headers.origin || null,
@@ -91,13 +95,13 @@ app.get("/api/auth/debug-cookie", (req, res) => {
   });
 });
 
-// Health check (PUBLIC)
+// Health check
 app.get("/ping", (_req, res) => res.json({ ok: true, t: Date.now() }));
 
 // --- PUBLIC AUTH ROUTES ---
 app.use("/api/auth", authRoutes);
 
-/* ---------------- TELEGRAM WEBHOOK (PUBLIC) ---------------- */
+/* ---------------- TELEGRAM WEBHOOK ---------------- */
 const TG_WEBHOOK_PATH = "/telegram/webhook";
 const TG_WEBHOOK_DOMAIN = process.env.TELEGRAM_WEBHOOK_DOMAIN || "";
 let stopTelegram = null;
@@ -116,7 +120,7 @@ if (bot) {
     }
   );
 }
-/* ------------------------------------------------------------ */
+/* --------------------------------------------------- */
 
 /* -------- PUBLIC: resolve-rego (must be before auth) -------- */
 app.post("/api/cars/resolve-rego", resolveRegoController);
@@ -161,7 +165,6 @@ async function start() {
       );
     });
 
-    // Telegram setup
     if (bot) {
       if (TG_WEBHOOK_DOMAIN) {
         const url = `https://${TG_WEBHOOK_DOMAIN}${TG_WEBHOOK_PATH}`;
@@ -169,33 +172,36 @@ async function start() {
           await bot.telegram.setWebhook(url);
           console.log(`[telegram] webhook set: ${url}`);
           stopTelegram = async () => {
-            try {
-              await bot.telegram.deleteWebhook();
-              console.log("[telegram] webhook deleted");
-            } catch (e) {
-              console.warn("[telegram] deleteWebhook failed:", e.message);
-            }
+            await bot.telegram.deleteWebhook();
+            console.log("[telegram] webhook deleted");
           };
         } catch (e) {
-          console.error("[telegram] setWebhook failed, fallback to polling:", e.message);
+          console.error("[telegram] webhook failed:", e.message);
           await bot.launch();
-          console.log("[telegram] launched in polling mode (fallback)");
+          console.log("[telegram] polling fallback");
           stopTelegram = async () => bot.stop("SIGTERM");
         }
       } else {
         await bot.launch();
-        console.log("[telegram] launched in polling mode");
+        console.log("[telegram] polling mode");
         stopTelegram = async () => bot.stop("SIGTERM");
       }
     }
 
-    // Graceful shutdown
     const shutdown = async (signal) => {
       console.log(`\nReceived ${signal}, shutting down...`);
-      try { if (stopTelegram) await stopTelegram(); } catch (e) { console.warn("Telegram stop error:", e.message); }
-      try { if (mongoose.connection.readyState) await mongoose.disconnect(); } catch (e) { console.error("Mongo disconnect error:", e.message); }
-      if (server) server.close(() => { console.log("HTTP server closed."); process.exit(0); });
-      else process.exit(0);
+      try {
+        if (stopTelegram) await stopTelegram();
+        if (mongoose.connection.readyState) await mongoose.disconnect();
+        if (server)
+          server.close(() => {
+            console.log("HTTP server closed.");
+            process.exit(0);
+          });
+      } catch (e) {
+        console.error("Shutdown error:", e.message);
+        process.exit(1);
+      }
     };
 
     process.on("SIGINT", () => shutdown("SIGINT"));

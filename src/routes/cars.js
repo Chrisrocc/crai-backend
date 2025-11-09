@@ -228,7 +228,7 @@ router.put("/:id", async (req, res) => {
   }
 });
 
-// ---------- PHOTO PREVIEW (uses R2 signed URL) ----------
+// ---------- PHOTO PREVIEW ----------
 router.get("/:carId/photo-preview", async (req, res) => {
   try {
     const car = await Car.findById(req.params.carId);
@@ -253,4 +253,21 @@ router.get("/:carId/photo-preview", async (req, res) => {
   }
 });
 
+// ---------- PUBLIC CONTROLLER: resolve rego ----------
+async function resolveRegoController(req, res) {
+  try {
+    const rego = String(req.body?.rego || "").trim().toUpperCase();
+    if (!rego) return res.status(400).json({ message: "rego is required" });
+
+    const car = await Car.findOne({ rego }).lean();
+    if (!car) return res.status(404).json({ message: "Car not found" });
+
+    res.json({ message: "Car found", data: car });
+  } catch (err) {
+    console.error("[resolveRegoController] error:", err);
+    res.status(500).json({ message: "Error resolving rego", error: err.message });
+  }
+}
+
 module.exports = router;
+module.exports.resolveRegoController = resolveRegoController;

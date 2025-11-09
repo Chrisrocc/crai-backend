@@ -4,10 +4,19 @@ const multer = require('multer');
 
 const Car = require('../models/Car');
 const timeline = require('../services/logging/timelineLogger');
-const { makeCarPhotoKey, getSignedViewUrl, getPresignedPutUrl, deleteObject } = require('../services/aws/s3');
+const {
+  makeCarPhotoKey,
+  uploadBufferToS3,
+  getSignedViewUrl,
+  getPresignedPutUrl,
+  deleteObject,
+} = require('../services/aws/s3');
 const { analyzeAndEnrichByS3Key } = require('../services/ai/visionEnrichment');
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 },
+});
 
 function robustDecode(val = '') {
   let out = String(val || '');
@@ -24,6 +33,7 @@ router.get('/:carId', async (req, res) => {
     console.log(`📸 [GET] carId=${req.params.carId}`);
     const car = await Car.findById(req.params.carId).lean();
     if (!car) return res.status(404).json({ message: 'Car not found' });
+
     const photos = await Promise.all(
       (car.photos || []).map(async (p) => ({
         key: p.key,
@@ -44,10 +54,16 @@ router.get('/:carId', async (req, res) => {
 router.post('/presign', async (req, res) => {
   try {
     const { carId, rego, filename, contentType } = req.body || {};
-    if (!carId && !rego) return res.status(400).json({ message: 'carId or rego required' });
+    if (!carId && !rego)
+      return res.status(400).json({ message: 'carId or rego required' });
     if (!filename) return res.status(400).json({ message: 'filename required' });
+
     const key = makeCarPhotoKey({ carId, rego, filename });
-    const { uploadUrl, expiresIn } = await getPresignedPutUrl({ key, contentType });
+    const { uploadUrl, expiresIn } = await getPresignedPutUrl({
+      key,
+      contentType,
+    });
+
     console.log('✅ [PRESIGN]', key);
     res.json({ data: { key, uploadUrl, expiresIn } });
   } catch (e) {
@@ -56,31 +72,24 @@ router.post('/presign', async (req, res) => {
   }
 });
 
-/* ================= ATTACH (fixed to preserve photo order) ================= */
+/* ================= ATTACH ================= */
 router.post('/attach', async (req, res) => {
   try {
     const { carId, key, caption = '' } = req.body || {};
     console.log(`🔗 [ATTACH] ${carId} ${key}`);
+
     const car = await Car.findById(carId);
     if (!car) return res.status(404).json({ message: 'Car not found' });
 
-    const existing = (car.photos || []).find((p) => p.key === key);
-    if (!existing) {
-      // ✅ Add new photo at the end, keeping existing order intact
-      car.photos = [...(car.photos || []), { key, caption }];
-    } else {
-      // ✅ Just update caption if the photo already exists (no duplicate, no reordering)
-      car.photos = car.photos.map((p) =>
-        p.key === key ? { ...p, caption: caption || p.caption } : p
-      );
+    const exists = (car.photos || []).some((p) => p.key === key);
+    if (!exists) {
+      car.photos.push({ key, caption });
+      await car.save();
     }
-
-    await car.save();
 
     const url = await getSignedViewUrl(key, 3600);
     res.status(201).json({ data: { key, caption, url } });
 
-    // Run enrichment asynchronously
     const tctx = timeline.newContext({ chatId: `upload:${carId}` });
     setImmediate(async () => {
       try {
@@ -98,16 +107,50 @@ router.post('/attach', async (req, res) => {
   }
 });
 
+/* ================= REORDER ================= */
+router.put('/reorder/:carId', async (req, res) => {
+  try {
+    const { photos } = req.body || {};
+    if (!Array.isArray(photos)) {
+      return res.status(400).json({ message: 'photos array required' });
+    }
+
+    const car = await Car.findById(req.params.carId);
+    if (!car) return res.status(404).json({ message: 'Car not found' });
+
+    // Keep only keys that already exist on the car
+    const validKeys = (car.photos || []).map((p) => p.key);
+    const reordered = photos
+      .filter((p) => validKeys.includes(p.key))
+      .map((p) => ({
+        key: p.key,
+        caption: p.caption || '',
+      }));
+
+    car.photos = reordered;
+    await car.save();
+
+    console.log(`✅ [REORDER] ${car.rego} (${reordered.length} photos)`);
+    res.json({ message: 'ok', count: reordered.length });
+  } catch (e) {
+    console.error('❌ [REORDER FAIL]', e.message);
+    res.status(500).json({ message: e.message });
+  }
+});
+
 /* ================= DELETE ================= */
 router.delete('/:carId', async (req, res) => {
   try {
     const rawKey = req.query.key;
     const key = robustDecode(rawKey);
+
     const car = await Car.findById(req.params.carId);
     if (!car) return res.status(404).json({ message: 'Car not found' });
+
     await deleteObject(key);
     car.photos = (car.photos || []).filter((p) => p.key !== key);
     await car.save();
+
     console.log(`🗑 [DELETE] ${key}`);
     res.json({ message: 'deleted', key });
   } catch (e) {

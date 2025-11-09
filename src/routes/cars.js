@@ -1,4 +1,3 @@
-// src/routes/cars.js
 const express = require('express');
 const router = express.Router();
 const Car = require('../models/Car');
@@ -8,6 +7,9 @@ const { decideCategoryForChecklist } = require('../services/ai/categoryDecider')
 const { upsertReconFromChecklist } = require('../services/reconUpsert');
 // ⬇️ CHANGE: use the manual normalizer so we don't auto-prepend "Inspect" for user/Telegram/Recon inputs
 const { normalizeChecklistManual } = require('../services/ai/checklistDeduper');
+
+// ✅ NEW: import AWS helper for signed photo URLs
+const { getSignedViewUrl } = require('../services/aws/s3');
 
 // ---------- helpers ----------
 const normalizeRego = (s) =>
@@ -78,7 +80,6 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
-
 // ---------- GET /api/cars ----------
 router.get('/', async (_req, res) => {
   try {
@@ -86,6 +87,22 @@ router.get('/', async (_req, res) => {
     res.json({ message: 'Cars retrieved successfully', data: cars });
   } catch (err) {
     res.status(500).json({ message: 'Error retrieving cars', error: err.message });
+  }
+});
+
+// ✅ ---------- NEW: GET /api/cars/:carId/photo-preview ----------
+router.get('/:carId/photo-preview', async (req, res) => {
+  try {
+    const car = await Car.findById(req.params.carId);
+    if (!car || !car.photos?.length)
+      return res.json({ data: null });
+
+    const first = car.photos[0];
+    const url = await getSignedViewUrl(first.key, 3600); // valid 1 hour
+    res.json({ data: url });
+  } catch (e) {
+    console.error("❌ [PHOTO PREVIEW FAIL]", e.message);
+    res.status(500).json({ message: e.message });
   }
 });
 
@@ -312,8 +329,8 @@ async function resolveRegoController(req, res) {
       year = '',
       description = '',
       ocrConfidence = 0.9,
-      apply = true,               // bot wants to apply by default
-      createIfMissing = false,    // public path: do not create on reject by default
+      apply = true,
+      createIfMissing = false,
     } = req.body || {};
 
     const makeT = String(make || '').trim();
@@ -335,7 +352,6 @@ async function resolveRegoController(req, res) {
       return res.status(400).json({ ok: false, error: 'regoOCR must be alphanumeric' });
     }
 
-    // candidates by make+model
     const candidates = await Car.find({
       make: new RegExp(`^${makeT}$`, 'i'),
       model: new RegExp(`^${modelT}$`, 'i'),
@@ -351,7 +367,6 @@ async function resolveRegoController(req, res) {
       return res.json({ ok: true, data: { action: 'reject', best: null } });
     }
 
-    // scoring: use weighted edit distance from your matching module
     const { weightedEditDistance } = require('../services/matching/regoMatcher');
     const scored = candidates
       .map(c => ({
@@ -369,10 +384,9 @@ async function resolveRegoController(req, res) {
       list: scored.slice(0, 10).map(s => ({ rego: s.rego, score: s.score })),
     });
 
-    // decisions (mirror your DEFAULT_POLICY-ish)
     const autoFixThreshold = 0.6;
-    const reviewThreshold  = 1.2;
-    const uniqueMargin     = 0.2;
+    const reviewThreshold = 1.2;
+    const uniqueMargin = 0.2;
 
     if (best && best.score === 0) {
       audit.write(actx, 'rego.resolve.decision', { summary: `exact ${best.rego}` });

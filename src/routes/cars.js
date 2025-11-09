@@ -1,3 +1,4 @@
+// src/routes/cars.js
 const express = require('express');
 const router = express.Router();
 const Car = require('../models/Car');
@@ -5,10 +6,7 @@ const Car = require('../models/Car');
 // AI helpers
 const { decideCategoryForChecklist } = require('../services/ai/categoryDecider');
 const { upsertReconFromChecklist } = require('../services/reconUpsert');
-// ⬇️ CHANGE: use the manual normalizer so we don't auto-prepend "Inspect" for user/Telegram/Recon inputs
 const { normalizeChecklistManual } = require('../services/ai/checklistDeduper');
-
-// ✅ NEW: import AWS helper for signed photo URLs
 const { getSignedViewUrl } = require('../services/aws/s3');
 
 // ---------- helpers ----------
@@ -53,7 +51,7 @@ const daysClosed = (start, end) => {
   return Math.max(1, Math.floor(diff / msPerDay));
 };
 
-// compute which checklist items are newly added (after normalization)
+// compute which checklist items are newly added
 function diffNewChecklistItems(oldList, newList) {
   const norm = (s) => String(s || '').trim().toLowerCase();
   const oldSet = new Set((Array.isArray(oldList) ? oldList : []).map(norm).filter(Boolean));
@@ -65,22 +63,20 @@ function diffNewChecklistItems(oldList, newList) {
   return added;
 }
 
-// ---------- DELETE /api/cars/:id ----------
+// ---------- DELETE ----------
 router.delete('/:id', async (req, res) => {
   try {
     const id = req.params.id;
     const doc = await Car.findByIdAndDelete(id);
-    if (!doc) {
-      return res.status(404).json({ message: 'Car not found' });
-    }
-    return res.status(204).end(); // or res.json({ message: 'Car deleted' })
+    if (!doc) return res.status(404).json({ message: 'Car not found' });
+    return res.status(204).end();
   } catch (err) {
     console.error('Delete car error:', err);
     return res.status(400).json({ message: 'Error deleting car', error: err.message });
   }
 });
 
-// ---------- GET /api/cars ----------
+// ---------- GET ALL ----------
 router.get('/', async (_req, res) => {
   try {
     const cars = await Car.find().lean();
@@ -90,27 +86,10 @@ router.get('/', async (_req, res) => {
   }
 });
 
-// ✅ ---------- NEW: GET /api/cars/:carId/photo-preview ----------
-router.get('/:carId/photo-preview', async (req, res) => {
-  try {
-    const car = await Car.findById(req.params.carId);
-    if (!car || !car.photos?.length)
-      return res.json({ data: null });
-
-    const first = car.photos[0];
-    const url = await getSignedViewUrl(first.key, 3600); // valid 1 hour
-    res.json({ data: url });
-  } catch (e) {
-    console.error("❌ [PHOTO PREVIEW FAIL]", e.message);
-    res.status(500).json({ message: e.message });
-  }
-});
-
-// ---------- POST /api/cars ----------
+// ---------- CREATE ----------
 router.post('/', async (req, res) => {
   try {
     const body = req.body || {};
-
     const payload = {
       rego: normalizeRego(body.rego),
       make: body.make?.trim() || '',
@@ -121,7 +100,6 @@ router.post('/', async (req, res) => {
         ? body.year
         : (String(body.year || '').trim() ? Number(body.year) : undefined),
       description: body.description?.trim() || '',
-      // ⬇️ CHANGE: manual normalizer (trim + dedupe only, no "Inspect" injection)
       checklist: normalizeChecklistManual(toCsvArray(body.checklist || [])),
       location: body.location?.trim() || '',
       nextLocations: [],
@@ -149,7 +127,6 @@ router.post('/', async (req, res) => {
     payload.nextLocations = stripCurrentFromNext(payload.nextLocations, payload.location);
 
     const doc = new Car(payload);
-    // ⬇️ CHANGE: keep as-typed on create
     doc.checklist = normalizeChecklistManual(doc.checklist);
     await doc.save();
 
@@ -162,7 +139,7 @@ router.post('/', async (req, res) => {
   }
 });
 
-// ---------- PUT /api/cars/:id ----------
+// ---------- UPDATE ----------
 router.put('/:id', async (req, res) => {
   try {
     const id = req.params.id;
@@ -170,7 +147,6 @@ router.put('/:id', async (req, res) => {
     const doc = await Car.findById(id);
     if (!doc) return res.status(404).json({ message: 'Car not found' });
 
-    // ⬇️ CHANGE: compare using manual-normalized set (no auto "Inspect")
     const beforeChecklist = normalizeChecklistManual(doc.checklist || []);
 
     if (body.rego !== undefined) doc.rego = normalizeRego(body.rego || '');
@@ -187,7 +163,6 @@ router.put('/:id', async (req, res) => {
     if (body.description !== undefined) doc.description = String(body.description || '').trim();
 
     if (body.checklist !== undefined) {
-      // ⬇️ CHANGE: manual normalizer on update
       doc.checklist = normalizeChecklistManual(toCsvArray(body.checklist));
     }
 
@@ -253,52 +228,36 @@ router.put('/:id', async (req, res) => {
       doc.nextLocations = stripCurrentFromNext(doc.nextLocations, doc.location);
     }
 
-    // ⬇️ CHANGE: keep as-typed on save
     doc.checklist = normalizeChecklistManual(doc.checklist || []);
     await doc.save();
 
     try {
-      // ⬇️ CHANGE: diff using manual-normalized lists
       const afterChecklist = normalizeChecklistManual(doc.checklist || []);
       const newlyAdded = diffNewChecklistItems(beforeChecklist, afterChecklist);
-
       if (newlyAdded.length) {
         const label =
           [doc.rego, [doc.make, doc.model].filter(Boolean).join(' ')].filter(Boolean).join(' — ') ||
           String(doc._id);
-
         for (const itemText of newlyAdded) {
           const trimmed = String(itemText || '').trim();
           try {
-            console.log(`- checklist item added : ${label} — "${trimmed}"`);
-
             let decided = { categoryName: 'Other', service: '' };
             try {
               decided = await decideCategoryForChecklist(trimmed, null);
             } catch (e) {
-              console.error(`- AI analysis failed, defaulting to "Other":`, e.message);
+              console.error(`AI failed for "${trimmed}"`, e.message);
             }
-            console.log(`- AI analysis: ${decided.categoryName || 'Other'} (service: ${decided.service || '-'})`);
-
-            const result = await upsertReconFromChecklist(
+            await upsertReconFromChecklist(
               { carId: doc._id, categoryName: decided.categoryName, noteText: trimmed, service: decided.service },
               null
             );
-
-            if (result?.created) {
-              console.log(`- Recon Appointment created [${decided.categoryName}] with note "${trimmed}"`);
-            } else if (result?.updated) {
-              console.log(`- Recon notes updated [${decided.categoryName}] add "${trimmed}"`);
-            } else {
-              console.log(`- No change (already present) in "${decided.categoryName}"`);
-            }
           } catch (e) {
-            console.error(`- checklist ingest error (car ${doc._id}):`, e.stack || e.message);
+            console.error(`checklist ingest error:`, e.stack || e.message);
           }
         }
       }
     } catch (e) {
-      console.error('post-save ingest block failed:', e.stack || e.message);
+      console.error('post-save ingest failed:', e.stack || e.message);
     }
 
     res.json({ message: 'Car updated successfully', data: doc.toJSON() });
@@ -306,18 +265,34 @@ router.put('/:id', async (req, res) => {
     if (err.code === 11000 && err.keyPattern && err.keyPattern.rego) {
       return res.status(409).json({ message: 'A car with this rego already exists.' });
     }
-    console.error('Update car error:', err);
     res.status(400).json({ message: 'Error updating car', error: err.message });
   }
 });
 
-// -------------- PUBLIC CONTROLLER: /api/cars/resolve-rego --------------
-/**
- * Exported so index.js can mount it BEFORE auth.
- * (Do not re-attach it to `router` here, to avoid double-mounting.)
- */
-const audit = require('../services/logging/auditLogger');
+// ---------- PHOTO PREVIEW (NEW) ----------
+router.get('/:carId/photo-preview', async (req, res) => {
+  try {
+    const car = await Car.findById(req.params.carId);
+    if (!car || !car.photos?.length) return res.json({ data: null });
 
+    const first = car.photos[0];
+    let key = first.key || first;
+    if (key.startsWith('http')) {
+      const urlObj = new URL(key);
+      key = urlObj.pathname.replace(/^\/+/, '');
+    }
+
+    const signedUrl = await getSignedViewUrl(key, 3600);
+    console.log(`🖼️ Signed preview generated for ${car.rego}:`, signedUrl);
+    res.json({ data: signedUrl });
+  } catch (e) {
+    console.error('❌ [PHOTO PREVIEW FAIL]', e);
+    res.status(500).json({ message: e.message });
+  }
+});
+
+// ---------- REGO RESOLVER ----------
+const audit = require('../services/logging/auditLogger');
 async function resolveRegoController(req, res) {
   try {
     const {
@@ -339,7 +314,7 @@ async function resolveRegoController(req, res) {
 
     const actx = audit.newContext({ chatId: req.header('X-Chat-Id') || null });
     audit.write(actx, 'rego.resolve.in', {
-      summary: `ocr:${regoT || '-'} ${makeT} ${modelT} ${color} conf:${ocrConfidence} apply:${apply}`,
+      summary: `ocr:${regoT || '-'} ${makeT} ${modelT} ${color} conf:${ocrConfidence}`,
       body: req.body,
     });
 
@@ -357,11 +332,6 @@ async function resolveRegoController(req, res) {
       model: new RegExp(`^${modelT}$`, 'i'),
     }).lean();
 
-    audit.write(actx, 'rego.resolve.candidates', {
-      summary: `candidates:${candidates.length}`,
-      regs: candidates.map(c => c.rego),
-    });
-
     if (!candidates.length) {
       audit.write(actx, 'rego.resolve.decision', { summary: 'reject: no candidates' });
       return res.json({ ok: true, data: { action: 'reject', best: null } });
@@ -369,49 +339,26 @@ async function resolveRegoController(req, res) {
 
     const { weightedEditDistance } = require('../services/matching/regoMatcher');
     const scored = candidates
-      .map(c => ({
-        car: c,
-        rego: c.rego,
-        score: weightedEditDistance(regoT, c.rego),
-      }))
+      .map(c => ({ car: c, rego: c.rego, score: weightedEditDistance(regoT, c.rego) }))
       .sort((a, b) => a.score - b.score);
 
     const best = scored[0];
     const second = scored[1];
-
-    audit.write(actx, 'rego.resolve.scored', {
-      summary: `best:${best?.rego || '-'} score:${best?.score ?? '-'}`,
-      list: scored.slice(0, 10).map(s => ({ rego: s.rego, score: s.score })),
-    });
-
     const autoFixThreshold = 0.6;
     const reviewThreshold = 1.2;
     const uniqueMargin = 0.2;
-
-    if (best && best.score === 0) {
-      audit.write(actx, 'rego.resolve.decision', { summary: `exact ${best.rego}` });
-      return res.json({ ok: true, data: { action: 'exact', best: { rego: best.rego } } });
-    }
-
-    if (!best) {
-      audit.write(actx, 'rego.resolve.decision', { summary: 'reject: no best' });
-      return res.json({ ok: true, data: { action: 'reject', best: null } });
-    }
-
     const secondScore = second ? second.score : Infinity;
     const unique = (secondScore - best.score) >= uniqueMargin;
 
-    if (best.score <= autoFixThreshold && unique) {
-      audit.write(actx, 'rego.resolve.apply', { summary: `auto-fix ${best.rego} (from ${regoT})` });
+    if (best && best.score === 0)
+      return res.json({ ok: true, data: { action: 'exact', best: { rego: best.rego } } });
+
+    if (best && best.score <= autoFixThreshold && unique)
       return res.json({ ok: true, data: { action: 'auto-fix', best: { rego: best.rego, id: String(best.car._id) } } });
-    }
 
-    if (best.score <= reviewThreshold) {
-      audit.write(actx, 'rego.resolve.decision', { summary: `review ${best.rego}` });
+    if (best && best.score <= reviewThreshold)
       return res.json({ ok: true, data: { action: 'review', best: { rego: best.rego, id: String(best.car._id) } } });
-    }
 
-    audit.write(actx, 'rego.resolve.decision', { summary: 'reject: over threshold' });
     return res.json({ ok: true, data: { action: 'reject', best: null } });
   } catch (err) {
     console.error('resolve-rego error:', err);

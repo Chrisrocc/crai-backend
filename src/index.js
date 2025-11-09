@@ -6,7 +6,10 @@ const mongoose = require("mongoose");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
 
-// Routers
+const app = express();
+const port = process.env.PORT || 5000;
+
+/* ----------------------  Routers  ---------------------- */
 const carsRouter = require("./routes/cars");
 const customerAppointmentsRouter = require("./routes/customerAppointments");
 const reconditionerCategoriesRouter = require("./routes/reconditionerCategories");
@@ -14,31 +17,40 @@ const reconditionerAppointmentsRouter = require("./routes/reconditionerAppointme
 const tasksRouter = require("./routes/tasks");
 const photoRoutes = require("./routes/photoRoutes");
 const reconIngestRoutes = require("./routes/reconIngest");
-const carImportRouter = require("./routes/carImport");
-const autogateSyncRoutes = require("./routes/autogateSync");
 
-// Auth
+// Some optional routes might not export a router correctly,
+// so we wrap them defensively:
+function safeRequireRouter(path) {
+  try {
+    const mod = require(path);
+    if (typeof mod === "function" || (mod && typeof mod.use === "function")) return mod;
+    console.warn(`[WARN] ${path} did not export a router function.`);
+    return express.Router();
+  } catch (e) {
+    console.warn(`[WARN] Failed to load ${path}:`, e.message);
+    return express.Router();
+  }
+}
+
+const carImportRouter = safeRequireRouter("./routes/carImport");
+const autogateSyncRoutes = safeRequireRouter("./routes/autogateSync");
+
+/* ----------------------  Auth ---------------------- */
 const authRoutes = require("./routes/auth");
 const requireAuth = require("./middleware/requireAuth");
-
-// Public controller for rego resolution (no auth)
 const { resolveRegoController } = require("./routes/cars");
 
-// Telegram (webhook or polling)
+/* ----------------------  Telegram ---------------------- */
 let bot = null;
 try {
   ({ bot } = require("./bots/telegram"));
 } catch (e) {
-  console.warn("[telemetry] telegram bot unavailable:", e.message);
+  console.warn("[telegram] unavailable:", e.message);
 }
 
-const app = express();
-const port = process.env.PORT || 5000;
-
-// Trust proxy (so secure cookies work behind Render/CF/Railway)
+/* ----------------------  Setup ---------------------- */
 app.set("trust proxy", 1);
 
-/* --------------------------  C O R S  -------------------------- */
 const BASE_PAGES_HOST = "crai-frontend.pages.dev";
 const FRONTEND_URLS = (process.env.FRONTEND_URL || "http://localhost:5173")
   .split(",")
@@ -46,12 +58,12 @@ const FRONTEND_URLS = (process.env.FRONTEND_URL || "http://localhost:5173")
   .filter(Boolean);
 
 function isAllowedOrigin(origin) {
-  if (!origin) return true; // curl/Postman/same-origin
+  if (!origin) return true;
   try {
     const { hostname } = new URL(origin);
     if (hostname === BASE_PAGES_HOST) return true;
-    if (hostname.endsWith("." + BASE_PAGES_HOST)) return true; // CF preview subdomains
-    if (FRONTEND_URLS.includes(origin)) return true; // explicit allow-list
+    if (hostname.endsWith("." + BASE_PAGES_HOST)) return true;
+    if (FRONTEND_URLS.includes(origin)) return true;
   } catch {}
   return false;
 }
@@ -60,7 +72,7 @@ const corsConfig = {
   origin(origin, cb) {
     const ok = isAllowedOrigin(origin);
     if (!ok) console.warn(`[CORS] blocked origin: ${origin || "(none)"}`);
-    return cb(null, ok);
+    cb(null, ok);
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -72,16 +84,12 @@ app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
-/* --------------------------------------------------------------- */
 
-/* -----------------  Body parser + cookies ----------------- */
-// 📸 Raised to 25 MB to support mobile photo uploads
 app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 app.use(cookieParser());
-/* ---------------------------------------------------------- */
 
-// Debug cookie/auth info (PUBLIC)
+/* ----------------------  Public endpoints ---------------------- */
 app.get("/api/auth/debug-cookie", (req, res) => {
   res.json({
     origin: req.headers.origin || null,
@@ -91,15 +99,12 @@ app.get("/api/auth/debug-cookie", (req, res) => {
   });
 });
 
-// Health check (PUBLIC)
 app.get("/ping", (_req, res) => res.json({ ok: true, t: Date.now() }));
-
-// --- PUBLIC AUTH ROUTES ---
 app.use("/api/auth", authRoutes);
 
-/* ---------------- TELEGRAM WEBHOOK (PUBLIC) ---------------- */
+/* ----------------------  Telegram webhook ---------------------- */
 const TG_WEBHOOK_PATH = "/telegram/webhook";
-const TG_WEBHOOK_DOMAIN = process.env.TELEGRAM_WEBHOOK_DOMAIN || ""; // e.g. crai-backend-production.up.railway.app
+const TG_WEBHOOK_DOMAIN = process.env.TELEGRAM_WEBHOOK_DOMAIN || "";
 let stopTelegram = null;
 
 if (bot) {
@@ -116,13 +121,11 @@ if (bot) {
     }
   );
 }
-/* ------------------------------------------------------------ */
 
-/* -------- PUBLIC: resolve-rego (must be before auth) -------- */
+/* ----------------------  Public: Rego Resolver ---------------------- */
 app.post("/api/cars/resolve-rego", resolveRegoController);
-/* ------------------------------------------------------------ */
 
-/* -------------------- PROTECTED ROUTES ---------------------- */
+/* ----------------------  Protected Routes ---------------------- */
 app.use("/api/cars", requireAuth, carsRouter);
 app.use("/api/customer-appointments", requireAuth, customerAppointmentsRouter);
 app.use("/api/reconditioner-categories", requireAuth, reconditionerCategoriesRouter);
@@ -130,23 +133,20 @@ app.use("/api/reconditioner-appointments", requireAuth, reconditionerAppointment
 app.use("/api/tasks", requireAuth, tasksRouter);
 app.use("/api/photos", requireAuth, photoRoutes);
 app.use("/api/recon", requireAuth, reconIngestRoutes);
+
+// ⚙️ Defensive guards for optional routes
 app.use("/api/cars", requireAuth, carImportRouter);
 app.use("/api/cars", requireAuth, autogateSyncRoutes);
-/* ------------------------------------------------------------ */
 
-// Root
+/* ----------------------  Root + Errors ---------------------- */
 app.get("/", (_req, res) => res.json({ message: "Welcome to CRAI Backend" }));
-
-// 404 fallback
 app.use((req, res) => res.status(404).json({ message: "Not Found" }));
-
-// Error handler
 app.use((err, _req, res, _next) => {
   console.error("Server error:", err.stack || err.message);
   res.status(500).json({ message: "Server error", error: err.message });
 });
 
-/* ------------------------ Startup -------------------------- */
+/* ----------------------  Startup ---------------------- */
 async function start() {
   let server;
   try {
@@ -161,7 +161,6 @@ async function start() {
       );
     });
 
-    // Telegram setup
     if (bot) {
       if (TG_WEBHOOK_DOMAIN) {
         const url = `https://${TG_WEBHOOK_DOMAIN}${TG_WEBHOOK_PATH}`;
@@ -189,7 +188,6 @@ async function start() {
       }
     }
 
-    // Graceful shutdown
     const shutdown = async (signal) => {
       console.log(`\nReceived ${signal}, shutting down...`);
       try { if (stopTelegram) await stopTelegram(); } catch (e) { console.warn("Telegram stop error:", e.message); }

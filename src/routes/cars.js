@@ -95,15 +95,18 @@ router.post('/', async (req, res) => {
       model: body.model?.trim() || '',
       badge: body.badge?.trim() || '',
       series: body.series?.trim() || '',
-      year: typeof body.year === 'number'
-        ? body.year
-        : (String(body.year || '').trim() ? Number(body.year) : undefined),
+      year:
+        typeof body.year === 'number'
+          ? body.year
+          : String(body.year || '').trim()
+          ? Number(body.year)
+          : undefined,
       description: body.description?.trim() || '',
       checklist: normalizeChecklist(toCsvArray(body.checklist || [])),
       location: body.location?.trim() || '',
       nextLocations: [],
       readinessStatus: body.readinessStatus?.trim() || '',
-      stage: (body.stage?.trim() || 'In Works'),
+      stage: body.stage?.trim() || 'In Works',
       notes: body.notes?.trim() || '',
       history: [],
     };
@@ -120,7 +123,9 @@ router.post('/', async (req, res) => {
     if (typeof body.nextLocation === 'string' && body.nextLocation.trim()) {
       payload.nextLocations = dedupePush(payload.nextLocations || [], body.nextLocation);
     } else if (Array.isArray(body.nextLocations)) {
-      payload.nextLocations = [...new Set(body.nextLocations.map((s) => String(s).trim()).filter(Boolean))];
+      payload.nextLocations = [
+        ...new Set(body.nextLocations.map((s) => String(s).trim()).filter(Boolean)),
+      ];
     }
 
     payload.nextLocations = stripCurrentFromNext(payload.nextLocations, payload.location);
@@ -166,18 +171,23 @@ router.put('/:id', async (req, res) => {
     }
 
     if (Array.isArray(body.nextLocations)) {
-      doc.nextLocations = [...new Set(body.nextLocations.map((s) => String(s).trim()).filter(Boolean))];
+      doc.nextLocations = [
+        ...new Set(body.nextLocations.map((s) => String(s).trim()).filter(Boolean)),
+      ];
     } else if (typeof body.nextLocation === 'string' && body.nextLocation.trim()) {
       doc.nextLocations = dedupePush(doc.nextLocations || [], body.nextLocation);
     }
 
-    if (body.readinessStatus !== undefined) doc.readinessStatus = String(body.readinessStatus || '').trim();
+    if (body.readinessStatus !== undefined)
+      doc.readinessStatus = String(body.readinessStatus || '').trim();
     if (body.stage !== undefined) doc.stage = String(body.stage || '').trim();
     if (body.notes !== undefined) doc.notes = String(body.notes || '').trim();
 
     {
       const incomingLoc =
-        body.location !== undefined ? String(body.location || '').trim() : (doc.location || '');
+        body.location !== undefined
+          ? String(body.location || '').trim()
+          : doc.location || '';
       doc.nextLocations = stripCurrentFromNext(doc.nextLocations, incomingLoc);
     }
 
@@ -233,6 +243,7 @@ router.put('/:id', async (req, res) => {
         key: p.key,
         caption: p.caption || '',
       }));
+      doc.markModified('photos'); // ✅ ensure reordering persists
     }
     // 🧩 -------------------------------
 
@@ -258,20 +269,38 @@ router.put('/:id', async (req, res) => {
             } catch (e) {
               console.error(`- AI analysis failed, defaulting to "Other":`, e.message);
             }
-            console.log(`- AI analysis: ${decided.categoryName || 'Other'} (service: ${decided.service || '-'})`);
+            console.log(
+              `- AI analysis: ${decided.categoryName || 'Other'} (service: ${
+                decided.service || '-'
+              })`
+            );
             const result = await upsertReconFromChecklist(
-              { carId: doc._id, categoryName: decided.categoryName, noteText: trimmed, service: decided.service },
+              {
+                carId: doc._id,
+                categoryName: decided.categoryName,
+                noteText: trimmed,
+                service: decided.service,
+              },
               null
             );
             if (result?.created) {
-              console.log(`- Recon Appointment created [${decided.categoryName}] with note "${trimmed}"`);
+              console.log(
+                `- Recon Appointment created [${decided.categoryName}] with note "${trimmed}"`
+              );
             } else if (result?.updated) {
-              console.log(`- Recon notes updated [${decided.categoryName}] add "${trimmed}"`);
+              console.log(
+                `- Recon notes updated [${decided.categoryName}] add "${trimmed}"`
+              );
             } else {
-              console.log(`- No change (already present) in "${decided.categoryName}"`);
+              console.log(
+                `- No change (already present) in "${decided.categoryName}"`
+              );
             }
           } catch (e) {
-            console.error(`- checklist ingest error (car ${doc._id}):`, e.stack || e.message);
+            console.error(
+              `- checklist ingest error (car ${doc._id}):`,
+              e.stack || e.message
+            );
           }
         }
       }
@@ -282,10 +311,14 @@ router.put('/:id', async (req, res) => {
     res.json({ message: 'Car updated successfully', data: doc.toJSON() });
   } catch (err) {
     if (err.code === 11000 && err.keyPattern && err.keyPattern.rego) {
-      return res.status(409).json({ message: 'A car with this rego already exists.' });
+      return res
+        .status(409)
+        .json({ message: 'A car with this rego already exists.' });
     }
     console.error('Update car error:', err);
-    res.status(400).json({ message: 'Error updating car', error: err.message });
+    res
+      .status(400)
+      .json({ message: 'Error updating car', error: err.message });
   }
 });
 
@@ -347,7 +380,7 @@ async function resolveRegoController(req, res) {
 
     audit.write(actx, 'rego.resolve.candidates', {
       summary: `candidates:${candidates.length}`,
-      regs: candidates.map(c => c.rego),
+      regs: candidates.map((c) => c.rego),
     });
 
     if (!candidates.length) {
@@ -357,7 +390,7 @@ async function resolveRegoController(req, res) {
 
     const { weightedEditDistance } = require('../services/matching/regoMatcher');
     const scored = candidates
-      .map(c => ({
+      .map((c) => ({
         car: c,
         rego: c.rego,
         score: weightedEditDistance(regoT, c.rego),
@@ -381,23 +414,39 @@ async function resolveRegoController(req, res) {
     }
 
     const secondScore = second ? second.score : Infinity;
-    const unique = (secondScore - best.score) >= uniqueMargin;
+    const unique = secondScore - best.score >= uniqueMargin;
 
     if (best.score <= autoFixThreshold && unique) {
-      audit.write(actx, 'rego.resolve.apply', { summary: `auto-fix ${best.rego} (from ${regoT})` });
-      return res.json({ ok: true, data: { action: 'auto-fix', best: { rego: best.rego, id: String(best.car._id) } } });
+      audit.write(actx, 'rego.resolve.apply', {
+        summary: `auto-fix ${best.rego} (from ${regoT})`,
+      });
+      return res.json({
+        ok: true,
+        data: {
+          action: 'auto-fix',
+          best: { rego: best.rego, id: String(best.car._id) },
+        },
+      });
     }
 
     if (best.score <= reviewThreshold) {
       audit.write(actx, 'rego.resolve.decision', { summary: `review ${best.rego}` });
-      return res.json({ ok: true, data: { action: 'review', best: { rego: best.rego, id: String(best.car._id) } } });
+      return res.json({
+        ok: true,
+        data: {
+          action: 'review',
+          best: { rego: best.rego, id: String(best.car._id) },
+        },
+      });
     }
 
     audit.write(actx, 'rego.resolve.decision', { summary: 'reject: over threshold' });
     return res.json({ ok: true, data: { action: 'reject', best: null } });
   } catch (err) {
     console.error('resolve-rego error:', err);
-    return res.status(500).json({ ok: false, error: err.message || 'resolver-failed' });
+    return res
+      .status(500)
+      .json({ ok: false, error: err.message || 'resolver-failed' });
   }
 }
 

@@ -4,7 +4,7 @@ const multer = require('multer');
 
 const Car = require('../models/Car');
 const timeline = require('../services/logging/timelineLogger');
-const { makeCarPhotoKey, uploadBufferToS3, getSignedViewUrl, getPresignedPutUrl, deleteObject } = require('../services/aws/s3');
+const { makeCarPhotoKey, getSignedViewUrl, getPresignedPutUrl, deleteObject } = require('../services/aws/s3');
 const { analyzeAndEnrichByS3Key } = require('../services/ai/visionEnrichment');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
@@ -24,14 +24,18 @@ router.get('/:carId', async (req, res) => {
     console.log(`📸 [GET] carId=${req.params.carId}`);
     const car = await Car.findById(req.params.carId).lean();
     if (!car) return res.status(404).json({ message: 'Car not found' });
-    const photos = await Promise.all((car.photos || []).map(async (p) => ({
-      key: p.key, caption: p.caption || '', uploadedAt: p.uploadedAt || null,
-      url: await getSignedViewUrl(p.key, 3600)
-    })));
+    const photos = await Promise.all(
+      (car.photos || []).map(async (p) => ({
+        key: p.key,
+        caption: p.caption || '',
+        uploadedAt: p.uploadedAt || null,
+        url: await getSignedViewUrl(p.key, 3600),
+      }))
+    );
     console.log(`✅ [GET] ${photos.length} photos`);
     res.json({ data: photos });
   } catch (e) {
-    console.error("❌ [GET FAIL]", e.message);
+    console.error('❌ [GET FAIL]', e.message);
     res.status(500).json({ message: e.message });
   }
 });
@@ -44,35 +48,52 @@ router.post('/presign', async (req, res) => {
     if (!filename) return res.status(400).json({ message: 'filename required' });
     const key = makeCarPhotoKey({ carId, rego, filename });
     const { uploadUrl, expiresIn } = await getPresignedPutUrl({ key, contentType });
-    console.log("✅ [PRESIGN]", key);
+    console.log('✅ [PRESIGN]', key);
     res.json({ data: { key, uploadUrl, expiresIn } });
   } catch (e) {
-    console.error("❌ [PRESIGN FAIL]", e.message);
+    console.error('❌ [PRESIGN FAIL]', e.message);
     res.status(500).json({ message: e.message });
   }
 });
 
-/* ================= ATTACH ================= */
+/* ================= ATTACH (fixed to preserve photo order) ================= */
 router.post('/attach', async (req, res) => {
   try {
     const { carId, key, caption = '' } = req.body || {};
     console.log(`🔗 [ATTACH] ${carId} ${key}`);
     const car = await Car.findById(carId);
     if (!car) return res.status(404).json({ message: 'Car not found' });
-    const exists = (car.photos || []).some(p => p.key === key);
-    if (!exists) { car.photos.push({ key, caption }); await car.save(); }
+
+    const existing = (car.photos || []).find((p) => p.key === key);
+    if (!existing) {
+      // ✅ Add new photo at the end, keeping existing order intact
+      car.photos = [...(car.photos || []), { key, caption }];
+    } else {
+      // ✅ Just update caption if the photo already exists (no duplicate, no reordering)
+      car.photos = car.photos.map((p) =>
+        p.key === key ? { ...p, caption: caption || p.caption } : p
+      );
+    }
+
+    await car.save();
+
     const url = await getSignedViewUrl(key, 3600);
     res.status(201).json({ data: { key, caption, url } });
+
+    // Run enrichment asynchronously
     const tctx = timeline.newContext({ chatId: `upload:${carId}` });
     setImmediate(async () => {
       try {
         await analyzeAndEnrichByS3Key({ carId, key, caption }, tctx);
         timeline.change(tctx, `Enriched ${car.rego} from ${key}`);
-      } catch (e) { console.error("💥 [VISION]", e.message); }
-      finally { timeline.print(tctx); }
+      } catch (e) {
+        console.error('💥 [VISION]', e.message);
+      } finally {
+        timeline.print(tctx);
+      }
     });
   } catch (e) {
-    console.error("❌ [ATTACH FAIL]", e.message);
+    console.error('❌ [ATTACH FAIL]', e.message);
     res.status(500).json({ message: e.message });
   }
 });
@@ -85,12 +106,12 @@ router.delete('/:carId', async (req, res) => {
     const car = await Car.findById(req.params.carId);
     if (!car) return res.status(404).json({ message: 'Car not found' });
     await deleteObject(key);
-    car.photos = (car.photos || []).filter(p => p.key !== key);
+    car.photos = (car.photos || []).filter((p) => p.key !== key);
     await car.save();
     console.log(`🗑 [DELETE] ${key}`);
     res.json({ message: 'deleted', key });
   } catch (e) {
-    console.error("❌ [DELETE FAIL]", e.message);
+    console.error('❌ [DELETE FAIL]', e.message);
     res.status(500).json({ message: e.message });
   }
 });

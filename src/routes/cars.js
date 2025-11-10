@@ -1,3 +1,4 @@
+// src/routes/cars.js
 const express = require("express");
 const router = express.Router();
 const Car = require("../models/Car");
@@ -5,8 +6,23 @@ const Car = require("../models/Car");
 // AI helpers
 const { decideCategoryForChecklist } = require("../services/ai/categoryDecider");
 const { upsertReconFromChecklist } = require("../services/reconUpsert");
-const { normalizeChecklist } = require("../services/ai/checklistDeduper");
-const { getSignedViewUrl } = require("../services/aws/s3"); // ✅ keep photo preview signing
+const { getSignedViewUrl } = require("../services/aws/s3");
+
+// checklist deduper: support both `module.exports = fn` and `{ normalizeChecklist }`
+const checklistDeduper = require("../services/ai/checklistDeduper");
+const normalizeChecklistRaw =
+  typeof checklistDeduper === "function"
+    ? checklistDeduper
+    : checklistDeduper && typeof checklistDeduper.normalizeChecklist === "function"
+    ? checklistDeduper.normalizeChecklist
+    : null;
+
+const normalizeChecklist = (input) => {
+  if (normalizeChecklistRaw) return normalizeChecklistRaw(input);
+  // safe fallback: ensure array of trimmed unique strings
+  const arr = Array.isArray(input) ? input : [];
+  return [...new Set(arr.map((s) => String(s).trim()).filter(Boolean))];
+};
 
 // ---------- helpers ----------
 const normalizeRego = (s) =>
@@ -166,7 +182,7 @@ router.post("/", async (req, res) => {
 // ---------- PUT /api/cars/:id ----------
 router.put("/:id", async (req, res) => {
   try {
-    // 🚫 Ignore updates triggered by /photos routes
+    // Ignore accidental PUTs from /photos helper paths
     if (req.originalUrl.includes("/photos/")) {
       console.log("⏩ Skipping cars PUT because it's from photo route");
       return res.status(400).json({ message: "Invalid cars PUT call" });
@@ -199,10 +215,18 @@ router.put("/:id", async (req, res) => {
 
     if (Array.isArray(body.nextLocations)) {
       doc.nextLocations = [
-        ...new Set(body.nextLocations.map((s) => String(s).trim()).filter(Boolean)),
+        ...new Set(
+          body.nextLocations.map((s) => String(s).trim()).filter(Boolean)
+        ),
       ];
-    } else if (typeof body.nextLocation === "string" && body.nextLocation.trim()) {
-      doc.nextLocations = dedupePush(doc.nextLocations || [], body.nextLocation);
+    } else if (
+      typeof body.nextLocation === "string" &&
+      body.nextLocation.trim()
+    ) {
+      doc.nextLocations = dedupePush(
+        doc.nextLocations || [],
+        body.nextLocation
+      );
     }
 
     if (body.readinessStatus !== undefined)
@@ -215,7 +239,10 @@ router.put("/:id", async (req, res) => {
         body.location !== undefined
           ? String(body.location || "").trim()
           : doc.location || "";
-      doc.nextLocations = stripCurrentFromNext(doc.nextLocations, incomingLoc);
+      doc.nextLocations = stripCurrentFromNext(
+        doc.nextLocations,
+        incomingLoc
+      );
     }
 
     if (body.location !== undefined) {
@@ -261,10 +288,13 @@ router.put("/:id", async (req, res) => {
         doc.location = "";
       }
 
-      doc.nextLocations = stripCurrentFromNext(doc.nextLocations, doc.location);
+      doc.nextLocations = stripCurrentFromNext(
+        doc.nextLocations,
+        doc.location
+      );
     }
 
-    // 🧩 --- PHOTO ORDER SYNC ---
+    // PHOTO ORDER SYNC (if frontend sends photos array)
     if (Array.isArray(body.photos)) {
       doc.photos = body.photos.map((p) => ({
         key: p.key,
@@ -272,19 +302,25 @@ router.put("/:id", async (req, res) => {
       }));
       doc.markModified("photos");
     }
-    // 🧩 ------------------------
 
     doc.checklist = normalizeChecklist(doc.checklist || []);
     await doc.save();
 
     try {
       const afterChecklist = normalizeChecklist(doc.checklist || []);
-      const newlyAdded = diffNewChecklistItems(beforeChecklist, afterChecklist);
+      const newlyAdded = diffNewChecklistItems(
+        beforeChecklist,
+        afterChecklist
+      );
 
       if (newlyAdded.length) {
         const label =
-          [doc.rego, [doc.make, doc.model].filter(Boolean).join(" ")].filter(Boolean).join(" — ") ||
-          String(doc._id);
+          [
+            doc.rego,
+            [doc.make, doc.model].filter(Boolean).join(" "),
+          ]
+            .filter(Boolean)
+            .join(" — ") || String(doc._id);
 
         for (const itemText of newlyAdded) {
           const trimmed = String(itemText || "").trim();
@@ -294,7 +330,10 @@ router.put("/:id", async (req, res) => {
             try {
               decided = await decideCategoryForChecklist(trimmed, null);
             } catch (e) {
-              console.error(`- AI analysis failed, defaulting to "Other":`, e.message);
+              console.error(
+                `- AI analysis failed, defaulting to "Other":`,
+                e.message
+              );
             }
             console.log(
               `- AI analysis: ${decided.categoryName || "Other"} (service: ${
@@ -319,15 +358,23 @@ router.put("/:id", async (req, res) => {
                 `- Recon notes updated [${decided.categoryName}] add "${trimmed}"`
               );
             } else {
-              console.log(`- No change (already present) in "${decided.categoryName}"`);
+              console.log(
+                `- No change (already present) in "${decided.categoryName}"`
+              );
             }
           } catch (e) {
-            console.error(`- checklist ingest error (car ${doc._id}):`, e.stack || e.message);
+            console.error(
+              `- checklist ingest error (car ${doc._id}):`,
+              e.stack || e.message
+            );
           }
         }
       }
     } catch (e) {
-      console.error("post-save ingest block failed:", e.stack || e.message);
+      console.error(
+        "post-save ingest block failed:",
+        e.stack || e.message
+      );
     }
 
     res.json({ message: "Car updated successfully", data: doc.toJSON() });
@@ -359,8 +406,9 @@ router.get("/:carId/photo-preview", async (req, res) => {
   }
 });
 
-// -------------- PUBLIC CONTROLLER: /api/cars/resolve-rego --------------
+// -------------- PUBLIC CONTROLLER EXPORT --------------
 const audit = require("../services/logging/auditLogger");
+
 async function resolveRegoController(req, res) {
   try {
     const {
@@ -388,11 +436,15 @@ async function resolveRegoController(req, res) {
 
     if (!makeT || !modelT) {
       audit.write(actx, "rego.resolve.error", { summary: "make+model missing" });
-      return res.status(400).json({ ok: false, error: "make and model are required" });
+      return res
+        .status(400)
+        .json({ ok: false, error: "make and model are required" });
     }
     if (!regoT || !/^[A-Z0-9]+$/.test(regoT)) {
       audit.write(actx, "rego.resolve.error", { summary: "invalid regoOCR" });
-      return res.status(400).json({ ok: false, error: "regoOCR must be alphanumeric" });
+      return res
+        .status(400)
+        .json({ ok: false, error: "regoOCR must be alphanumeric" });
     }
 
     const candidates = await Car.find({
@@ -406,11 +458,14 @@ async function resolveRegoController(req, res) {
     });
 
     if (!candidates.length) {
-      audit.write(actx, "rego.resolve.decision", { summary: "reject: no candidates" });
+      audit.write(actx, "rego.resolve.decision", {
+        summary: "reject: no candidates",
+      });
       return res.json({ ok: true, data: { action: "reject", best: null } });
     }
 
-    const { weightedEditDistance } = require("../services/matching/regoMatcher");
+    const { weightedEditDistance } =
+      require("../services/matching/regoMatcher");
     const scored = candidates
       .map((c) => ({
         car: c,
@@ -426,12 +481,19 @@ async function resolveRegoController(req, res) {
     const uniqueMargin = 0.2;
 
     if (best && best.score === 0) {
-      audit.write(actx, "rego.resolve.decision", { summary: `exact ${best.rego}` });
-      return res.json({ ok: true, data: { action: "exact", best: { rego: best.rego } } });
+      audit.write(actx, "rego.resolve.decision", {
+        summary: `exact ${best.rego}`,
+      });
+      return res.json({
+        ok: true,
+        data: { action: "exact", best: { rego: best.rego } },
+      });
     }
 
     if (!best) {
-      audit.write(actx, "rego.resolve.decision", { summary: "reject: no best" });
+      audit.write(actx, "rego.resolve.decision", {
+        summary: "reject: no best",
+      });
       return res.json({ ok: true, data: { action: "reject", best: null } });
     }
 
@@ -452,7 +514,9 @@ async function resolveRegoController(req, res) {
     }
 
     if (best.score <= reviewThreshold) {
-      audit.write(actx, "rego.resolve.decision", { summary: `review ${best.rego}` });
+      audit.write(actx, "rego.resolve.decision", {
+        summary: `review ${best.rego}`,
+      });
       return res.json({
         ok: true,
         data: {
@@ -462,11 +526,16 @@ async function resolveRegoController(req, res) {
       });
     }
 
-    audit.write(actx, "rego.resolve.decision", { summary: "reject: over threshold" });
+    audit.write(actx, "rego.resolve.decision", {
+      summary: "reject: over threshold",
+    });
     return res.json({ ok: true, data: { action: "reject", best: null } });
   } catch (err) {
     console.error("resolve-rego error:", err);
-    return res.status(500).json({ ok: false, error: err.message || "resolver-failed" });
+    return res.status(500).json({
+      ok: false,
+      error: err.message || "resolver-failed",
+    });
   }
 }
 

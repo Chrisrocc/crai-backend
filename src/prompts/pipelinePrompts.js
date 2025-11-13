@@ -348,6 +348,7 @@ Dual-category rules:
   NEXT_LOCATION - Christian: "Drop off Dmax to Capital."
 `;
 
+// Step 3: Categorize (dynamic; uses keywords + rules)
 function CATEGORIZE_SYSTEM_DYNAMIC(RECON_KEYWORDS_FLAT) {
   return `
 You are provided with sub-messages from a car yard group chat. Each line starts with a sender (e.g., "Christian: …"). Some lines may begin with "[PHOTO]". Preserve the sender and any "[PHOTO]".
@@ -368,7 +369,7 @@ CANONICAL CATEGORIES:
 - OTHER
 - NEXT_LOCATION
 
-Recon keyword hints (case-insensitive; if any appear, that signals RECON_APPOINTMENT):
+Recon hints (case-insensitive). If any of the following words/phrases appear in the line, that strongly signals RECON_APPOINTMENT. This list is built from the user's configured **keywords + rules**:
 ${RECON_KEYWORDS_FLAT || '(none)'}
 
 Use these triggers only:
@@ -379,7 +380,7 @@ Use these triggers only:
 - NEXT_LOCATION: future destination intent only.
 - TASK: people logistics or generic chores (photos, fuel, bring out, prep, etc).
 - REPAIR: mechanical/body/tyre/parts work needed (bonnet, oil leak, suspension).
-- RECON_APPOINTMENT: service/RWC/tint/tyres/battery type appointments (context + keywords).
+- RECON_APPOINTMENT: service/RWC/tint/tyres/body/interior/keys/mechanical type appointments (context + the hints above).
 - SOLD: car is sold.
 - OTHER: useful notes that aren’t actionable.
 
@@ -387,7 +388,6 @@ Duplication:
 - If the same line is both a movement (DROP_OFF/LOCATION_UPDATE) and a service job, duplicate as DROP_OFF (or LOCATION_UPDATE) and REPAIR.
 `;
 }
-
 
 // ===================================================================
 // Extractors — ALL actions include: rego, make, model, badge, description, year
@@ -484,22 +484,31 @@ Return STRICT minified JSON only:
 `;
 
 // ----------------------- RECON_APPOINTMENT (DB-DRIVEN; NO HARDCODED RULES) -----------------------
+// RECON_APPOINTMENT extractor (DB-driven; uses keywords + rules)
 function EXTRACT_RECON_APPOINTMENT_FROM_DB(ALLOWED_CATEGORY_LIST, CATEGORY_KEYWORDS_MAP) {
   return `
 From only RECON_APPOINTMENT lines, extract actions.
 
-${VEHICLE_FIELDS_HELP}
+Field requirements (ORDER MATTERS):
+- rego: UPPERCASE, no spaces, "" if not provided.
+- make: Proper Case, "" if unknown (infer from model if unambiguous).
+- model: Proper Case or common formatting (e.g., "i30", "BT-50").
+- badge: series/variant if present (e.g., "SR5", "XLT", "GX", "ST-L"), else "".
+- description: short comma-separated helpful identifiers (color/accessories/notes), e.g., "white, bulbar, roof racks". "" if none.
+- year: 4-digit if present, else "".
+Always place identification fields first in the object in this exact order:
+rego, make, model, badge, description, year
 
 Choose the category STRICTLY from this allowed list (case-insensitive):
 ${ALLOWED_CATEGORY_LIST || '"Other"'}
 
 Category assignment rules (data-driven):
-- Use ONLY the user-configured keywords below. A category matches if any of its keywords (case-insensitive) appear in the text.
-- If multiple categories match, pick the one with the most distinct keyword hits; if still tied, pick the one that appears first in the allowed list above.
+- Use ONLY the user-configured **keywords/rules** below. A category matches if any of its keywords OR rules (case-insensitive substring match) appear in the text.
+- If multiple categories match, pick the one with the most distinct keyword/rule hits; if still tied, pick the one that appears first in the allowed list above.
 - If NO category matches, set category to "Other".
 - Do NOT invent categories.
 
-User-configured keywords per category:
+User-configured keywords/rules per category:
 ${CATEGORY_KEYWORDS_MAP || '- none provided -'}
 
 Return STRICT minified JSON only:
@@ -511,6 +520,7 @@ Return STRICT minified JSON only:
 - Keep keys in EXACT order as shown above.
 `;
 }
+
 
 // ----------------------- NEXT_LOCATION -----------------------
 const EXTRACT_NEXT_LOCATION = `

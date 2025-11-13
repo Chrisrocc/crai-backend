@@ -43,29 +43,47 @@ const ActionsOut = z.object({
 
 /* ================================
    Helpers for dynamic prompts
+   (NOW: keywords + rules)
 ================================ */
 function buildAllowedCatsString(cats = []) {
   if (!Array.isArray(cats) || cats.length === 0) return '"Other"';
   return cats.map((c) => `"${String(c.name).trim()}"`).join(', ');
 }
+
 function buildCatKeywordMapString(cats = []) {
   if (!Array.isArray(cats) || cats.length === 0) return '';
-  return cats.map((c) => {
-    const name = String(c.name || '').trim();
-    const kws = (c.keywords || []).map((k) => `"${String(k).trim().toLowerCase()}"`).join(', ');
-    return `${name}: [${kws}]`;
-  }).join('\n');
+  return cats
+    .map((c) => {
+      const name = String(c.name || '').trim();
+      const items = [
+        ...((c.keywords || []).map((k) => String(k).trim().toLowerCase()).filter(Boolean)),
+        ...((c.rules || []).map((r) => String(r).trim().toLowerCase()).filter(Boolean)),
+      ];
+      const uniq = Array.from(new Set(items));
+      const list = uniq.map((t) => `"${t}"`).join(', ');
+      return `${name}: [${list}]`;
+    })
+    .join('\n');
 }
-function buildReconKeywordsFlat(cats = []) {
+
+function buildReconHintsFlat(cats = []) {
   const set = new Set();
-  for (const c of cats) for (const k of (c.keywords || [])) {
-    const v = String(k || '').trim().toLowerCase();
-    if (v) set.add(v);
+  for (const c of (Array.isArray(cats) ? cats : [])) {
+    for (const k of (c.keywords || [])) {
+      const v = String(k || '').trim().toLowerCase();
+      if (v) set.add(v);
+    }
+    for (const r of (c.rules || [])) {
+      const v = String(r || '').trim().toLowerCase();
+      if (v) set.add(v);
+    }
   }
   if (set.size === 0) return '';
   return Array.from(set).map((s) => `- "${s}"`).join('\n');
 }
-const fmt = (msgs) => msgs.map((m) => `${m.speaker || 'Unknown'}: '${m.text}'`).join('\n');
+
+const fmt = (msgs) => (Array.isArray(msgs) ? msgs : [])
+  .map((m) => `${m.speaker || 'Unknown'}: '${m.text}'`).join('\n');
 
 /* ================================
    Duplication Guarantees
@@ -73,11 +91,13 @@ const fmt = (msgs) => msgs.map((m) => `${m.speaker || 'Unknown'}: '${m.text}'`).
 function applyDuplicationRules(items) {
   const base = Array.isArray(items) ? items : [];
   const out = base.slice();
+
   for (const it of base) {
     if (it.category === 'REPAIR') out.push({ ...it, category: 'RECON_APPOINTMENT' });
     if (it.category === 'RECON_APPOINTMENT') out.push({ ...it, category: 'REPAIR' });
     if (it.category === 'DROP_OFF') out.push({ ...it, category: 'NEXT_LOCATION' });
   }
+
   const seen = new Set();
   const deduped = [];
   for (const it of out) {
@@ -99,19 +119,22 @@ async function filterRefineCategorize(batch, tctx) {
   const r = FilterOut.parse(await chatJSON({ system: P.REFINE_SYSTEM, user: fmt(f.messages) }));
   timeline.recordP2(tctx, r.messages);
 
-  // Dynamic categorizer
+  // Load DB categories (keywords + rules)
   let cats = [];
-  try { cats = await ReconditionerCategory.find().lean(); }
-  catch (e) { timeline.recordP3(tctx, { warn: 'failed to load categories for dynamic categorizer', error: e.message }); }
+  try {
+    cats = await ReconditionerCategory.find().lean();
+  } catch (e) {
+    timeline.recordP3(tctx, { warn: 'failed to load categories for dynamic categorizer', error: e.message });
+  }
 
-  const reconKeywordsList = buildReconKeywordsFlat(cats);
-  const categorizeSystem = reconKeywordsList
-    ? P.CATEGORIZE_SYSTEM_DYNAMIC(reconKeywordsList)
+  const reconHintsFlat = buildReconHintsFlat(cats); // includes keywords + rules
+  const categorizeSystem = reconHintsFlat
+    ? P.CATEGORIZE_SYSTEM_DYNAMIC(reconHintsFlat)
     : P.CATEGORIZE_SYSTEM;
 
   if (DEBUG) {
     console.log('\n==== PIPELINE DEBUG :: CATEGORIZER (Step 3) ====');
-    console.log('Recon keywords (flat):\n' + (reconKeywordsList || '(none)'));
+    console.log('Recon hints (keywords + rules):\n' + (reconHintsFlat || '(none)'));
     console.log('\n-- System prompt sent --\n' + categorizeSystem);
     const userPayload = fmt(r.messages);
     console.log('\n-- User payload --\n' + (userPayload || '(empty)'));
@@ -136,6 +159,7 @@ async function extractActions(items, tctx) {
   for (const it of items) (by[it.category] || by.OTHER).push(it);
 
   const actions = [];
+
   async function run(cat, sys, label) {
     const user = by[cat].map((i) => `${i.speaker}: '${i.text}'`).join('\n');
     if (!user) return;
@@ -160,21 +184,24 @@ async function extractActions(items, tctx) {
   await run('DROP_OFF', P.EXTRACT_DROP_OFF, 'drop_off');
   await run('CUSTOMER_APPOINTMENT', P.EXTRACT_CUSTOMER_APPOINTMENT, 'customer_appointment');
 
-  // RECON extractor (DB-driven)
+  // RECON extractor (DB-driven; keywords + rules)
   if (by.RECON_APPOINTMENT.length > 0) {
     let cats = [];
-    try { cats = await ReconditionerCategory.find().lean(); }
-    catch (e) { timeline.recordExtract(tctx, 'recon_cats_error', { error: e.message }); }
+    try {
+      cats = await ReconditionerCategory.find().lean();
+    } catch (e) {
+      timeline.recordExtract(tctx, 'recon_cats_error', { error: e.message });
+    }
 
     const allowed = buildAllowedCatsString(cats);
-    const mapping = buildCatKeywordMapString(cats);
+    const mapping = buildCatKeywordMapString(cats); // includes rules
     const sys = P.EXTRACT_RECON_APPOINTMENT_FROM_DB(allowed, mapping);
     const user = by.RECON_APPOINTMENT.map((i) => `${i.speaker}: '${i.text}'`).join('\n');
 
     if (DEBUG) {
       console.log('\n==== PIPELINE DEBUG :: RECON EXTRACTOR (Step 4) ====');
       console.log('Allowed categories:\n' + allowed);
-      console.log('\nKeyword mapping:\n' + (mapping || '(none)'));
+      console.log('\nKeyword/rule mapping:\n' + (mapping || '(none)'));
       console.log('\n-- System prompt sent --\n' + sys);
       console.log('\n-- User payload --\n' + (user || '(empty)'));
       console.log('==================================================\n');
@@ -192,7 +219,9 @@ async function extractActions(items, tctx) {
   await run('TASK', P.EXTRACT_TASK, 'task');
 
   // normalize rego
-  for (const a of actions) if ('rego' in a && a.rego) a.rego = a.rego.replace(/\s+/g, '').toUpperCase();
+  for (const a of actions) {
+    if ('rego' in a && a.rego) a.rego = a.rego.replace(/\s+/g, '').toUpperCase();
+  }
 
   timeline.recordExtractAll(tctx, actions);
   return actions;

@@ -369,7 +369,7 @@ CANONICAL CATEGORIES:
 - OTHER
 - NEXT_LOCATION
 
-Recon hints (case-insensitive). If any of the following words/phrases appear in the line, that strongly signals RECON_APPOINTMENT. This list is built from the user's configured **keywords + rules**:
+Recon hints (case-insensitive). If any of the following words/phrases appear in the line, that strongly signals RECON_APPOINTMENT. The list below is built from the user's configured **keywords + rules**:
 ${RECON_KEYWORDS_FLAT || '(none)'}
 
 Use these triggers only:
@@ -380,7 +380,7 @@ Use these triggers only:
 - NEXT_LOCATION: future destination intent only.
 - TASK: people logistics or generic chores (photos, fuel, bring out, prep, etc).
 - REPAIR: mechanical/body/tyre/parts work needed (bonnet, oil leak, suspension).
-- RECON_APPOINTMENT: service/RWC/tint/tyres/body/interior/keys/mechanical type appointments (context + the hints above).
+- RECON_APPOINTMENT: service/RWC/tint/tyres/body/interior/keys/mechanical type appointments (use context + the hints above).
 - SOLD: car is sold.
 - OTHER: useful notes that aren’t actionable.
 
@@ -388,6 +388,7 @@ Duplication:
 - If the same line is both a movement (DROP_OFF/LOCATION_UPDATE) and a service job, duplicate as DROP_OFF (or LOCATION_UPDATE) and REPAIR.
 `;
 }
+
 
 // ===================================================================
 // Extractors — ALL actions include: rego, make, model, badge, description, year
@@ -485,7 +486,7 @@ Return STRICT minified JSON only:
 
 // ----------------------- RECON_APPOINTMENT (DB-DRIVEN; NO HARDCODED RULES) -----------------------
 // RECON_APPOINTMENT extractor (DB-driven; uses keywords + rules)
-function EXTRACT_RECON_APPOINTMENT_FROM_DB(ALLOWED_CATEGORY_LIST, CATEGORY_KEYWORDS_MAP) {
+function EXTRACT_RECON_APPOINTMENT_FROM_DB(ALLOWED_CATEGORY_LIST, CATEGORY_KEYWORDS_RULES_MAP, CATEGORY_DEFAULT_SERVICE_MAP) {
   return `
 From only RECON_APPOINTMENT lines, extract actions.
 
@@ -499,27 +500,36 @@ Field requirements (ORDER MATTERS):
 Always place identification fields first in the object in this exact order:
 rego, make, model, badge, description, year
 
-Choose the category STRICTLY from this allowed list (case-insensitive):
+Choose "category" values STRICTLY from this allowed list (case-insensitive, in priority order):
 ${ALLOWED_CATEGORY_LIST || '"Other"'}
 
-Category assignment rules (data-driven):
-- Use ONLY the user-configured **keywords/rules** below. A category matches if any of its keywords OR rules (case-insensitive substring match) appear in the text.
-- If multiple categories match, pick the one with the most distinct keyword/rule hits; if still tied, pick the one that appears first in the allowed list above.
-- If NO category matches, set category to "Other".
+Matching & multi-category rules (data-driven):
+- Use ONLY the user-configured entries below. A category matches if ANY of its "keywords" OR "rules" (case-insensitive substring) appear in the text.
+- If MULTIPLE categories match the SAME line (e.g., engine + bumper), output MULTIPLE actions: one per category.
+- When multiple categories match:
+  1) Score each by the number of DISTINCT matches (keywords + rules combined).
+  2) Keep all categories that have the TOP score (ties allowed).
+  3) If too many ties, keep at most the first 3 by the allowed-list priority.
+- If NO category matches, output a SINGLE action with "category":"Other".
 - Do NOT invent categories.
 
-User-configured keywords/rules per category:
-${CATEGORY_KEYWORDS_MAP || '- none provided -'}
+User-configured categories (for matching):
+${CATEGORY_KEYWORDS_RULES_MAP || '- none provided -'}
+
+Default services (optional). If a category has a default service and the text doesn't specify a different one, set "service" to that default:
+${CATEGORY_DEFAULT_SERVICE_MAP || '- none provided -'}
 
 Return STRICT minified JSON only:
 {"actions":[
   {"type":"RECON_APPOINTMENT","rego":"","make":"","model":"","badge":"","description":"","year":"","name":"","service":"","category":"","dateTime":"","notes":""}
 ]}
 
+- Output 1+ actions for the same input line if multiple categories match (one action per category).
 - Strings only. Unknown → "".
 - Keep keys in EXACT order as shown above.
 `;
 }
+
 
 
 // ----------------------- NEXT_LOCATION -----------------------

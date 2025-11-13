@@ -43,14 +43,20 @@ const ActionsOut = z.object({
 
 /* ================================
    Helpers for dynamic prompts
-   (NOW: keywords + rules)
+   (keywords + rules + defaults)
 ================================ */
-function buildAllowedCatsString(cats = []) {
+function buildAllowedCatsStringSorted(cats = []) {
   if (!Array.isArray(cats) || cats.length === 0) return '"Other"';
-  return cats.map((c) => `"${String(c.name).trim()}"`).join(', ');
+  const sorted = [...cats].sort((a, b) => {
+    const ao = Number(a.sortOrder ?? 0);
+    const bo = Number(b.sortOrder ?? 0);
+    if (ao !== bo) return ao - bo;
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  });
+  return sorted.map((c) => `"${String(c.name).trim()}"`).join(', ');
 }
 
-function buildCatKeywordMapString(cats = []) {
+function buildCatKeywordRuleMapString(cats = []) {
   if (!Array.isArray(cats) || cats.length === 0) return '';
   return cats
     .map((c) => {
@@ -62,6 +68,17 @@ function buildCatKeywordMapString(cats = []) {
       const uniq = Array.from(new Set(items));
       const list = uniq.map((t) => `"${t}"`).join(', ');
       return `${name}: [${list}]`;
+    })
+    .join('\n');
+}
+
+function buildCatDefaultServiceMapString(cats = []) {
+  if (!Array.isArray(cats) || cats.length === 0) return '';
+  return cats
+    .map((c) => {
+      const name = String(c.name || '').trim();
+      const def = String(c.defaultService || '').trim();
+      return `${name}: "${def}"`;
     })
     .join('\n');
 }
@@ -92,12 +109,14 @@ function applyDuplicationRules(items) {
   const base = Array.isArray(items) ? items : [];
   const out = base.slice();
 
+  // Keep your existing duplication semantics
   for (const it of base) {
     if (it.category === 'REPAIR') out.push({ ...it, category: 'RECON_APPOINTMENT' });
     if (it.category === 'RECON_APPOINTMENT') out.push({ ...it, category: 'REPAIR' });
     if (it.category === 'DROP_OFF') out.push({ ...it, category: 'NEXT_LOCATION' });
   }
 
+  // Deduplicate (speaker+text+category)
   const seen = new Set();
   const deduped = [];
   for (const it of out) {
@@ -184,7 +203,7 @@ async function extractActions(items, tctx) {
   await run('DROP_OFF', P.EXTRACT_DROP_OFF, 'drop_off');
   await run('CUSTOMER_APPOINTMENT', P.EXTRACT_CUSTOMER_APPOINTMENT, 'customer_appointment');
 
-  // RECON extractor (DB-driven; keywords + rules)
+  // RECON extractor (DB-driven; keywords + rules + default services; allow multi-match)
   if (by.RECON_APPOINTMENT.length > 0) {
     let cats = [];
     try {
@@ -193,15 +212,18 @@ async function extractActions(items, tctx) {
       timeline.recordExtract(tctx, 'recon_cats_error', { error: e.message });
     }
 
-    const allowed = buildAllowedCatsString(cats);
-    const mapping = buildCatKeywordMapString(cats); // includes rules
-    const sys = P.EXTRACT_RECON_APPOINTMENT_FROM_DB(allowed, mapping);
+    const allowed     = buildAllowedCatsStringSorted(cats);
+    const mapKwRules  = buildCatKeywordRuleMapString(cats);
+    const mapDefaults = buildCatDefaultServiceMapString(cats);
+
+    const sys = P.EXTRACT_RECON_APPOINTMENT_FROM_DB(allowed, mapKwRules, mapDefaults);
     const user = by.RECON_APPOINTMENT.map((i) => `${i.speaker}: '${i.text}'`).join('\n');
 
     if (DEBUG) {
       console.log('\n==== PIPELINE DEBUG :: RECON EXTRACTOR (Step 4) ====');
       console.log('Allowed categories:\n' + allowed);
-      console.log('\nKeyword/rule mapping:\n' + (mapping || '(none)'));
+      console.log('\nKeyword/rule mapping:\n' + (mapKwRules || '(none)'));
+      console.log('\nDefault services:\n' + (mapDefaults || '(none)'));
       console.log('\n-- System prompt sent --\n' + sys);
       console.log('\n-- User payload --\n' + (user || '(empty)'));
       console.log('==================================================\n');

@@ -5,8 +5,9 @@ const P = require('../../prompts/pipelinePrompts');
 const timeline = require('../logging/timelineLogger');
 const ReconditionerCategory = require('../../models/ReconditionerCategory'); // DB categories
 
-// Toggle verbose debugging of dynamic prompts via .env
-const DEBUG = process.env.PIPELINE_DEBUG === '1';
+// ---------- env / debug ----------
+const DEBUG = String(process.env.PIPELINE_DEBUG || '').trim() === '1';
+const dbg = (...args) => { if (DEBUG) console.log(...args); };
 
 /**
  * -------- Schemas for LLM I/O --------
@@ -205,11 +206,14 @@ async function filterRefineCategorize(batch, tctx) {
     ? P.CATEGORIZE_SYSTEM_DYNAMIC(reconKeywordsList)
     : P.CATEGORIZE_SYSTEM;
 
+  // DEBUG: Show exactly what the model sees for the categorizer
   if (DEBUG) {
-    console.log('\n---- DYNAMIC CATEGORIZER (Step 3) ----');
+    console.log('\n==== PIPELINE DEBUG :: CATEGORIZER (Step 3) ====');
     console.log('Recon keywords (flat):\n' + (reconKeywordsList || '(none)'));
-    console.log('\nSystem prompt sent to model:\n' + categorizeSystem);
-    console.log('--------------------------------------\n');
+    console.log('\n-- System prompt sent --\n' + categorizeSystem);
+    const userPayload = fmt(r.messages);
+    console.log('\n-- User payload --\n' + (userPayload || '(empty)'));
+    console.log('==============================================\n');
   }
 
   const c = CatOut.parse(
@@ -249,6 +253,15 @@ async function extractActions(items, tctx) {
   async function run(cat, sys, label) {
     const user = by[cat].map((i) => `${i.speaker}: '${i.text}'`).join('\n');
     if (!user) return;
+
+    // DEBUG: generic extractor payloads (for visibility)
+    if (DEBUG && label !== 'recon_appointment_db') {
+      console.log(`\n==== PIPELINE DEBUG :: EXTRACTOR [${label}] ====`);
+      console.log('-- System prompt sent --\n' + sys);
+      console.log('\n-- User payload --\n' + user);
+      console.log('==============================================\n');
+    }
+
     const raw = await chatJSON({ system: sys, user });
     timeline.recordExtract(tctx, label, raw);
     const parsed = ActionsOut.safeParse(raw);
@@ -275,20 +288,28 @@ async function extractActions(items, tctx) {
 
     const allowed = buildAllowedCatsString(cats);     // e.g. "Auto Electrical","Tint","Battery"
     const mapping = buildCatKeywordMapString(cats);   // e.g. Battery: ["brad floyd","battery","aerial"]
-
     const sys = P.EXTRACT_RECON_APPOINTMENT_FROM_DB(allowed, mapping);
 
+    // Build the user payload (what lines we’re extracting)
+    const user = by.RECON_APPOINTMENT.map((i) => `${i.speaker}: '${i.text}'`).join('\n');
+
+    // DEBUG: show exactly what the model sees for RECON extractor
     if (DEBUG) {
-      const userPreview = by.RECON_APPOINTMENT.map((i) => `${i.speaker}: '${i.text}'`).join('\n');
-      console.log('\n---- RECON EXTRACTOR PROMPT (Step 4) ----');
-      console.log('Allowed categories:', allowed);
-      console.log('Category → keywords mapping:\n' + (mapping || '(none)'));
-      console.log('\nSystem prompt sent to model:\n' + sys);
-      console.log('\nUser payload:\n' + (userPreview || '(empty)'));
-      console.log('-----------------------------------------\n');
+      console.log('\n==== PIPELINE DEBUG :: RECON EXTRACTOR (Step 4) ====');
+      console.log('Allowed categories:\n' + allowed);
+      console.log('\nKeyword mapping:\n' + (mapping || '(none)'));
+      console.log('\n-- System prompt sent --\n' + sys);
+      console.log('\n-- User payload --\n' + (user || '(empty)'));
+      console.log('==================================================\n');
     }
 
-    await run('RECON_APPOINTMENT', sys, 'recon_appointment_db');
+    // Run RECON extractor directly (bypass generic run() to keep custom debug above)
+    if (user) {
+      const raw = await chatJSON({ system: sys, user });
+      timeline.recordExtract(tctx, 'recon_appointment_db', raw);
+      const parsed = ActionsOut.safeParse(raw);
+      if (parsed.success) actions.push(...parsed.data.actions);
+    }
   }
 
   await run('NEXT_LOCATION', P.EXTRACT_NEXT_LOCATION, 'next_location');

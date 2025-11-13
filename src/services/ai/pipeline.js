@@ -5,6 +5,9 @@ const P = require('../../prompts/pipelinePrompts');
 const timeline = require('../logging/timelineLogger');
 const ReconditionerCategory = require('../../models/ReconditionerCategory'); // DB categories
 
+// Toggle verbose debugging of dynamic prompts via .env
+const DEBUG = process.env.PIPELINE_DEBUG === '1';
+
 /**
  * -------- Schemas for LLM I/O --------
  */
@@ -202,6 +205,13 @@ async function filterRefineCategorize(batch, tctx) {
     ? P.CATEGORIZE_SYSTEM_DYNAMIC(reconKeywordsList)
     : P.CATEGORIZE_SYSTEM;
 
+  if (DEBUG) {
+    console.log('\n---- DYNAMIC CATEGORIZER (Step 3) ----');
+    console.log('Recon keywords (flat):\n' + (reconKeywordsList || '(none)'));
+    console.log('\nSystem prompt sent to model:\n' + categorizeSystem);
+    console.log('--------------------------------------\n');
+  }
+
   const c = CatOut.parse(
     await chatJSON({ system: categorizeSystem, user: fmt(r.messages) })
   );
@@ -267,6 +277,17 @@ async function extractActions(items, tctx) {
     const mapping = buildCatKeywordMapString(cats);   // e.g. Battery: ["brad floyd","battery","aerial"]
 
     const sys = P.EXTRACT_RECON_APPOINTMENT_FROM_DB(allowed, mapping);
+
+    if (DEBUG) {
+      const userPreview = by.RECON_APPOINTMENT.map((i) => `${i.speaker}: '${i.text}'`).join('\n');
+      console.log('\n---- RECON EXTRACTOR PROMPT (Step 4) ----');
+      console.log('Allowed categories:', allowed);
+      console.log('Category → keywords mapping:\n' + (mapping || '(none)'));
+      console.log('\nSystem prompt sent to model:\n' + sys);
+      console.log('\nUser payload:\n' + (userPreview || '(empty)'));
+      console.log('-----------------------------------------\n');
+    }
+
     await run('RECON_APPOINTMENT', sys, 'recon_appointment_db');
   }
 

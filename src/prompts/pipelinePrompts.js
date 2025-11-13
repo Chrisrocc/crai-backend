@@ -348,7 +348,7 @@ Dual-category rules:
   NEXT_LOCATION - Christian: "Drop off Dmax to Capital."
 `;
 
-function CATEGORIZE_SYSTEM_DYNAMIC() {
+function CATEGORIZE_SYSTEM_DYNAMIC(RECON_KEYWORDS_FLAT) {
   return `
 You are provided with sub-messages from a car yard group chat. Each line starts with a sender (e.g., "Christian: …"). Some lines may begin with "[PHOTO]". Preserve the sender and any "[PHOTO]".
 Assign exactly one canonical category per output line. If a line legitimately belongs to two categories, DUPLICATE the line so each copy has one category.
@@ -368,6 +368,9 @@ CANONICAL CATEGORIES:
 - OTHER
 - NEXT_LOCATION
 
+Recon keyword hints (case-insensitive; if any appear, that signals RECON_APPOINTMENT):
+${RECON_KEYWORDS_FLAT || '(none)'}
+
 Use these triggers only:
 - READY: a specific car is ready.
 - DROP_OFF: drop/pickup/swap moves.
@@ -376,7 +379,7 @@ Use these triggers only:
 - NEXT_LOCATION: future destination intent only.
 - TASK: people logistics or generic chores (photos, fuel, bring out, prep, etc).
 - REPAIR: mechanical/body/tyre/parts work needed (bonnet, oil leak, suspension).
-- RECON_APPOINTMENT: service/RWC/tint/tyres/battery type appointments (context-based, not keyword-based).
+- RECON_APPOINTMENT: service/RWC/tint/tyres/battery type appointments (context + keywords).
 - SOLD: car is sold.
 - OTHER: useful notes that aren’t actionable.
 
@@ -384,6 +387,7 @@ Duplication:
 - If the same line is both a movement (DROP_OFF/LOCATION_UPDATE) and a service job, duplicate as DROP_OFF (or LOCATION_UPDATE) and REPAIR.
 `;
 }
+
 
 // ===================================================================
 // Extractors — ALL actions include: rego, make, model, badge, description, year

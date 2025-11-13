@@ -1,6 +1,10 @@
 // src/index.js
 require('dotenv').config();
 
+// Force PIPELINE_DEBUG on if unset (so Railway logs always show prompts)
+if (!process.env.PIPELINE_DEBUG) process.env.PIPELINE_DEBUG = '1';
+console.log('[BOOT] PIPELINE_DEBUG(effective)=', process.env.PIPELINE_DEBUG);
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -76,7 +80,7 @@ app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 app.use(cookieParser());
 
-// Quick debug route
+// Debug route
 app.get('/api/auth/debug-cookie', (req, res) => {
   res.json({
     origin: req.headers.origin || null,
@@ -139,7 +143,6 @@ async function start() {
     await mongoose.connect(process.env.MONGO_URI);
     console.log('✅ Connected to MongoDB');
 
-    // show PIPELINE_DEBUG at boot (so you KNOW it's set)
     console.log('[BOOT] PIPELINE_DEBUG =', String(process.env.PIPELINE_DEBUG || '').trim());
 
     server = app.listen(port, () => {
@@ -163,7 +166,7 @@ async function start() {
         }
       } else {
         await bot.launch();
-        console.log('[telegram] polling mode');
+        console.log('[telegram] polling mode]');
         stopTelegram = async () => bot.stop('SIGTERM');
       }
     }

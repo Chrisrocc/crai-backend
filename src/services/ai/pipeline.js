@@ -3,10 +3,10 @@ const { z } = require('zod');
 const { chatJSON } = require('./llmClient');
 const P = require('../../prompts/pipelinePrompts');
 const timeline = require('../logging/timelineLogger');
-const ReconditionerCategory = require('../../models/ReconditionerCategory'); // DB categories
+const ReconditionerCategory = require('../../models/ReconditionerCategory');
 
 // ---------- env / debug ----------
-const DEBUG = String(process.env.PIPELINE_DEBUG || '').trim() === '1';
+const DEBUG = String(process.env.PIPELINE_DEBUG || '1').trim() === '1'; // default ON
 const dbg = (...args) => { if (DEBUG) console.log(...args); };
 
 /* ================================
@@ -99,13 +99,15 @@ async function filterRefineCategorize(batch, tctx) {
   const r = FilterOut.parse(await chatJSON({ system: P.REFINE_SYSTEM, user: fmt(f.messages) }));
   timeline.recordP2(tctx, r.messages);
 
-  // Dynamic categorizer (promote RECON when a keyword exists)
+  // Dynamic categorizer
   let cats = [];
   try { cats = await ReconditionerCategory.find().lean(); }
   catch (e) { timeline.recordP3(tctx, { warn: 'failed to load categories for dynamic categorizer', error: e.message }); }
 
   const reconKeywordsList = buildReconKeywordsFlat(cats);
-  const categorizeSystem = reconKeywordsList ? P.CATEGORIZE_SYSTEM_DYNAMIC(reconKeywordsList) : P.CATEGORIZE_SYSTEM;
+  const categorizeSystem = reconKeywordsList
+    ? P.CATEGORIZE_SYSTEM_DYNAMIC(reconKeywordsList)
+    : P.CATEGORIZE_SYSTEM;
 
   if (DEBUG) {
     console.log('\n==== PIPELINE DEBUG :: CATEGORIZER (Step 3) ====');

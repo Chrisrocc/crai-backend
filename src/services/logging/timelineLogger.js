@@ -1,304 +1,229 @@
+// src/services/logging/timelineLogger.js
+// Pretty, sectioned timeline with compact single-line entries + AI AUDIT box.
+
 const { randomUUID } = require('crypto');
 
 const _store = new Map();
+const bar = '──────────────────────────────────';
 
-// ---------- tiny helpers ----------
-const idOf = (x) => (typeof x === 'string' ? x : x?.id);
-const safeArr = (x) => (Array.isArray(x) ? x : []);
-const cap = (s) => String(s || '');
-const joinNonEmpty = (arr, sep = ' ') => arr.filter(Boolean).join(sep);
-const trimLen = (s, n = 160) => (s.length > n ? s.slice(0, n) + ' …' : s);
-
-const box = (title) => {
-  const line = '─'.repeat(Math.max(34, title.length + 2));
-  return `\n${line}\n ${title}\n${line}`;
-};
-const bullet = (s) => `  - ${s}`;
-
-// ---------- compact action renderers ----------
-function summarizeAction(a) {
-  const rego = cap(a.rego);
-  const mm = joinNonEmpty([cap(a.make), cap(a.model)], ' ');
-  const badge = cap(a.badge);
-  const desc = cap(a.description);
-  const year = cap(a.year);
-
-  const head = joinNonEmpty(
-    [
-      rego && `rego ${rego}`,
-      mm && mm,
-      badge && `(${badge})`,
-      year && `(${year})`,
-    ],
-    ' • '
-  );
-
-  switch (a.type) {
-    case 'LOCATION_UPDATE':
-      return `LOCATION_UPDATE: {${head}${head ? ', ' : ''}location: ${cap(a.location)}}`;
-    case 'SOLD':
-      return `SOLD: {${head || 'vehicle'}}`;
-    case 'REPAIR': {
-      const parts = cap(a.checklistItem || desc || 'repair');
-      return `REPAIR: {${head}${head ? ', ' : ''}task: ${parts}}`;
-    }
-    case 'READY': {
-      const r = cap(a.readiness || 'ready');
-      return `READY: {${head}${head ? ', ' : ''}${r}}`;
-    }
-    case 'DROP_OFF': {
-      const dest = cap(a.destination);
-      const note = cap(a.note);
-      return `DROP_OFF: {${head}${head ? ', ' : ''}to: ${dest}${note ? `, note: ${note}` : ''}}`;
-    }
-    case 'CUSTOMER_APPOINTMENT': {
-      const name = cap(a.name);
-      const dt = cap(a.dateTime);
-      const notes = cap(a.notes);
-      return `CUSTOMER_APPOINTMENT: {${head}${head ? ', ' : ''}${joinNonEmpty([name && `name: ${name}`, dt && `time: ${dt}`, notes && `notes: ${notes}`], ', ')}}`;
-    }
-    case 'RECON_APPOINTMENT': {
-      const svc = cap(a.service);
-      const cat = cap(a.category);
-      const dt = cap(a.dateTime);
-      const notes = cap(a.notes);
-      return `RECON_APPOINTMENT: {${head}${head ? ', ' : ''}${joinNonEmpty([cat && `category: ${cat}`, svc && `service: ${svc}`, dt && `time: ${dt}`, notes && `notes: ${notes}`], ', ')}}`;
-    }
-    case 'NEXT_LOCATION': {
-      return `NEXT_LOCATION: {${head}${head ? ', ' : ''}next: ${cap(a.nextLocation)}}`;
-    }
-    case 'TASK': {
-      return `TASK: {${head}${head ? ', ' : ''}${cap(a.task)}}`;
-    }
-    default:
-      return `${a.type || 'ACTION'}: {${head || 'vehicle'}}`;
-  }
+function newId() {
+  try { return randomUUID(); } catch { return Math.random().toString(36).slice(2) + Date.now(); }
 }
 
-function compactActionsList(actions = []) {
-  return safeArr(actions).map((a) => bullet(summarizeAction(a))).join('\n');
-}
-
-// ---------- state ----------
 function newContext({ chatId }) {
-  const id =
-    typeof randomUUID === 'function'
-      ? randomUUID()
-      : Math.random().toString(36).slice(2) + Date.now();
-
+  const id = newId();
   const ctx = {
     id,
     chatId,
 
-    // inputs
-    batched: [],           // [{speaker,text}]
-    photoAnalysis: [],     // [string]
-    regoOk: [],            // [string]
-    regoFail: [],          // [string]
-    carCreated: [],        // [string]
+    // Raw inputs / steps
+    messages: [],                 // array of "Name: message"
+    photoAnalysis: [],            // strings
+    regoMatches: [],              // strings
+    carCreations: [],             // strings
 
-    // prompts (legacy buckets)
-    p1: [], // filtered messages
-    p2: [], // refined messages
-    p3: [], // categorized items [{speaker,text,category}]
+    // Prompts (ordered)
+    prompts: [],                  // { name, inputText, outputText }
 
-    // generic prompts if you want: recordPrompt(name,input,output)
-    prompts: [],           // [{name,input,output}]
+    // Legacy compatibility (pipeline uses these)
+    batched: [],
+    p1: [],
+    p2: [],
+    p3: [],
+    extracts: [],                 // { label, jsonString }
+    extractAll: '',
 
-    // extractor raw outputs and combined actions
-    extracts: [],          // [{label, raw}] where raw is {actions:[...]} or anything
-    actions: [],
+    // Identification + change notes
+    ident: [],
+    changes: [],
 
-    // audit / notes
-    identNotes: [],        // ✓/✗ lines
-    changes: [],           // • change lines
-    audit: [],             // overall QA audit lines
+    // AI audit
+    audit: [],                    // array of one-line strings
   };
-
   _store.set(id, ctx);
   return ctx;
 }
-const get = (x) => _store.get(idOf(x)) || null;
 
-// ---------- recorders ----------
-function recordBatch(ctx, messages = []) { const s = get(ctx); if (s) s.batched = safeArr(messages); }
-function recordPhoto(ctx, lines = [])     { const s = get(ctx); if (s) s.photoAnalysis.push(...safeArr(lines)); }
-
-function recordRegoSuccess(ctx, label)    { const s = get(ctx); if (s) s.regoOk.push(cap(label)); }
-function recordRegoFail(ctx, label)       { const s = get(ctx); if (s) s.regoFail.push(cap(label)); }
-function recordCarCreated(ctx, label)     { const s = get(ctx); if (s) s.carCreated.push(cap(label)); }
-
-function recordP1(ctx, messages = [])     { const s = get(ctx); if (s) s.p1 = safeArr(messages); }
-function recordP2(ctx, messages = [])     { const s = get(ctx); if (s) s.p2 = safeArr(messages); }
-function recordP3(ctx, items = [])        { const s = get(ctx); if (s) s.p3 = safeArr(items); }
-
-function recordPrompt(ctx, name, input, output) {
-  const s = get(ctx); if (!s) return;
-  s.prompts.push({ name: cap(name || 'PROMPT'), input, output });
+function get(idOrCtx) {
+  const id = typeof idOrCtx === 'string' ? idOrCtx : idOrCtx?.id;
+  return _store.get(id) || null;
 }
 
+/* -------- High-level recorders -------- */
+function recordMessage(ctx, name, text) {
+  const s = get(ctx); if (!s) return;
+  s.messages.push(`- ${name}: ${text}`);
+}
+
+function recordPhoto(ctx, line) {
+  const s = get(ctx); if (!s) return;
+  s.photoAnalysis.push(`- ${line}`);
+}
+
+function recordRego(ctx, line) {
+  const s = get(ctx); if (!s) return;
+  s.regoMatches.push(`- ${line}`);
+}
+
+function recordCarCreate(ctx, line) {
+  const s = get(ctx); if (!s) return;
+  s.carCreations.push(`- ${line}`);
+}
+
+function recordPrompt(ctx, name, inputText, outputText) {
+  const s = get(ctx); if (!s) return;
+  s.prompts.push({ name, inputText: String(inputText || ''), outputText: String(outputText || '') });
+}
+
+/* -------- Legacy recorders (kept so pipeline code doesn't break) -------- */
+function recordBatch(ctx, messages = []) {
+  const s = get(ctx); if (!s) return;
+  s.batched = messages.map(m => `${m.speaker || 'Unknown'}: '${m.text}'`);
+}
+function recordP1(ctx, messages = []) {
+  const s = get(ctx); if (!s) return;
+  s.p1 = messages.map(m => `${m.speaker || 'Unknown'}: '${m.text}'`);
+}
+function recordP2(ctx, messages = []) {
+  const s = get(ctx); if (!s) return;
+  s.p2 = messages.map(m => `${m.speaker || 'Unknown'}: '${m.text}'`);
+}
+function recordP3(ctx, items = []) {
+  const s = get(ctx); if (!s) return;
+  s.p3 = items.map(i => ({ text: `${i.speaker || 'Unknown'}: '${i.text}'`, category: i.category }));
+}
 function recordExtract(ctx, label, rawObj) {
   const s = get(ctx); if (!s) return;
-  s.extracts.push({ label: cap(label), raw: rawObj });
+  try { s.extracts.push({ label, jsonString: JSON.stringify(rawObj) }); }
+  catch { s.extracts.push({ label, jsonString: '{"actions":[]}' }); }
 }
 function recordExtractAll(ctx, actions = []) {
   const s = get(ctx); if (!s) return;
-  s.actions = safeArr(actions);
+  try { s.extractAll = JSON.stringify({ actions }); }
+  catch { s.extractAll = '{"actions":[]}'; }
 }
 
+/* -------- Identification + change notes -------- */
 function identSuccess(ctx, { rego = '', make = '', model = '' } = {}) {
   const s = get(ctx); if (!s) return;
-  const label = rego || joinNonEmpty([make, model]);
-  s.identNotes.push(`✓ Identified: ${label || '(unknown)'}`);
+  const label = rego || [make, model].filter(Boolean).join(' ');
+  s.ident.push(`- ✓ Identified: ${label || '(unknown)'}`);
 }
 function identFail(ctx, { reason = '', rego = '', make = '', model = '' } = {}) {
   const s = get(ctx); if (!s) return;
-  const label = rego || joinNonEmpty([make, model]);
-  s.identNotes.push(`✗ Not identified${label ? ` (${label})` : ''}${reason ? `: ${reason}` : ''}`);
+  const input = rego || [make, model].filter(Boolean).join(' ');
+  s.ident.push(`- ✗ Not identified${input ? ` (${input})` : ''}: ${reason}`);
 }
-function change(ctx, text = '') { const s = get(ctx); if (!s) return; if (text) s.changes.push(text); }
-function auditLine(ctx, text = '') { const s = get(ctx); if (!s) return; if (text) s.audit.push(text); }
+function change(ctx, text = '') {
+  const s = get(ctx); if (!s) return;
+  if (text) s.changes.push(`- ${text}`);
+}
 
-// ---------- rendering ----------
-function fmtMsgs(msgs = []) {
-  if (!msgs.length) return '  (none)';
-  return msgs.map((m) => bullet(`${cap(m.speaker || 'Unknown')}: ${trimLen(cap(m.text))}`)).join('\n');
+/* -------- AI Audit -------- */
+function auditLine(ctx, line) {
+  const s = get(ctx); if (!s) return;
+  if (line) s.audit.push(`- ${line}`);
 }
-function fmtCats(items = []) {
-  if (!items.length) return '  (none)';
-  return items
-    .map((i) => bullet(`${cap(i.category)} — ${cap(i.speaker || 'Unknown')}: ${trimLen(cap(i.text))}`))
-    .join('\n');
+
+/* -------- Print (pretty, compact, readable) -------- */
+function section(title, linesArray) {
+  const has = Array.isArray(linesArray) && linesArray.length > 0;
+  if (!has) return '';
+  const body = linesArray.join('\n');
+  return `\n ${title.toUpperCase()}\n${bar}\n${body}\n`;
 }
-function fmtExtractorBlocks(extracts = []) {
-  const lines = [];
-  for (const e of safeArr(extracts)) {
-    const label = e.label ? e.label.toUpperCase() : 'EXTRACT';
-    let actions = [];
+
+function sectionPrompts(title, prompts) {
+  if (!prompts || prompts.length === 0) return '';
+  const chunks = prompts.map(p => {
+    const inp = p.inputText ? `INPUT:\n  ${p.inputText}` : 'INPUT:\n  [none]';
+    const out = p.outputText ? `OUTPUT:\n  ${p.outputText}` : 'OUTPUT:\n  [none]';
+    return ` PROMPT: ${p.name}\n${bar}\n${inp}\n${out}`;
+  });
+  return `\n ${title.toUpperCase()}\n${bar}\n${chunks.join('\n')}\n`;
+}
+
+function sectionCat(title, categorized) {
+  if (!categorized || categorized.length === 0) return '';
+  const lines = categorized.map(c => `- ${c.category} — ${c.speaker || 'Unknown'}: '${c.text}'`);
+  return `\n ${title.toUpperCase()}\n${bar}\n${lines.join('\n')}\n`;
+}
+
+function sectionExtractors(title, extractsJson) {
+  if (!extractsJson || extractsJson.length === 0) return '';
+  // Render each extractor label with one line per action, compact
+  const chunks = [];
+  for (const e of extractsJson) {
+    let pretty = '';
     try {
-      const raw = typeof e.raw === 'string' ? JSON.parse(e.raw) : e.raw;
-      if (raw && Array.isArray(raw.actions)) actions = raw.actions;
-    } catch { /* ignore */ }
-    if (actions.length) {
-      lines.push(`\n# ${label}\n${compactActionsList(actions)}`);
+      const obj = JSON.parse(e.jsonString || '{}');
+      const acts = Array.isArray(obj.actions) ? obj.actions : [];
+      const lines = acts.map(a => {
+        const rego = (a.rego || '').toUpperCase() || '—';
+        if (a.type === 'REPAIR') return `  - REPAIR: {rego ${rego} • ${[a.make, a.model].filter(Boolean).join(' ') || '—'}, task: ${a.checklistItem || 'repair'}}`;
+        if (a.type === 'RECON_APPOINTMENT') return `  - RECON_APPOINTMENT: {rego ${rego} • ${[a.make, a.model].filter(Boolean).join(' ') || '—'}, category: ${a.category || 'Uncategorized'}}`;
+        if (a.type === 'LOCATION_UPDATE') return `  - LOCATION_UPDATE: {rego ${rego}, at: ${a.location || 'unknown'}}`;
+        if (a.type === 'CUSTOMER_APPOINTMENT') return `  - CUSTOMER_APPOINTMENT: {rego ${rego}, ${a.name || '—'} @ ${a.dateTime || '—'}}`;
+        if (a.type === 'NEXT_LOCATION') return `  - NEXT_LOCATION: {rego ${rego} → ${a.nextLocation || '—'}}`;
+        if (a.type === 'DROP_OFF') return `  - DROP_OFF: {rego ${rego} → ${a.destination || '—'}}`;
+        if (a.type === 'TASK') return `  - TASK: {rego ${rego}, ${a.task || '—'}}`;
+        if (a.type === 'READY') return `  - READY: {rego ${rego}}`;
+        if (a.type === 'SOLD') return `  - SOLD: {rego ${rego}}`;
+        return `  - ${a.type || 'UNKNOWN'}: {rego ${rego}}`;
+      });
+      pretty = lines.join('\n');
+    } catch {
+      pretty = '  - (unparsable extractor output)';
     }
+    chunks.push(`# ${e.label.toUpperCase()}\n${pretty || '  - (no actions)'}`);
   }
-  return lines.join('');
+  return `\n ${title.toUpperCase()}\n${bar}\n${chunks.join('\n')}\n`;
 }
 
 function print(ctx) {
   const s = get(ctx); if (!s) return;
 
-  let out = '';
+  const out =
+    section('Messages', s.messages) +
+    section('Photo Analysis', s.photoAnalysis) +
+    section('Rego Checker / Matcher', s.regoMatches) +
+    section('Car Creator', s.carCreations) +
+    sectionPrompts('Prompts', s.prompts) +
+    sectionCat('Categorized', s.p3) +
+    sectionExtractors('Extractors', s.extracts) +
+    (s.extractAll ? `\n FINAL OUTPUT & ACTIONS\n${bar}\n  ${s.extractAll}\n` : '') +
+    section('Identification', s.ident) +
+    section('Changes', s.changes) +
+    section('AI Audit', s.audit) +
+    '\n';
 
-  // 1) Messages (input)
-  out += box('MESSAGES');
-  out += `\n${fmtMsgs(s.batched)}\n`;
-
-  // 2) Photo analysis (optional)
-  if (s.photoAnalysis.length) {
-    out += box('PHOTO ANALYSIS');
-    out += '\n' + s.photoAnalysis.map((x) => bullet(trimLen(cap(x)))).join('\n') + '\n';
-  }
-
-  // 3) Rego checker / creator
-  out += box('REGO CHECKER / MATCHER');
-  if (!s.regoOk.length && !s.regoFail.length) {
-    out += '\n  (no rego results)\n';
-  } else {
-    if (s.regoOk.length) out += '\nCar identified:\n' + s.regoOk.map((x) => bullet(x)).join('\n') + '\n';
-    if (s.regoFail.length) out += '\nNot identified:\n' + s.regoFail.map((x) => bullet(x)).join('\n') + '\n';
-  }
-  if (s.carCreated.length) {
-    out += box('CAR CREATOR');
-    out += '\n' + s.carCreated.map((x) => bullet(x)).join('\n') + '\n';
-  }
-
-  // 4) Prompts (compact)
-  out += box('FILTER');
-  out += '\nINPUT:'  + (s.batched.length ? `\n${fmtMsgs(s.batched)}` : ' (none)');
-  out += '\nOUTPUT:' + (s.p1.length ? `\n${fmtMsgs(s.p1)}`       : ' (none)');
-
-  out += box('REFINE');
-  out += '\nINPUT:'  + (s.p1.length ? `\n${fmtMsgs(s.p1)}`       : ' (none)');
-  out += '\nOUTPUT:' + (s.p2.length ? `\n${fmtMsgs(s.p2)}`       : ' (none)');
-
-  out += box('CATEGORIZE');
-  out += '\nINPUT:'  + (s.p2.length ? `\n${fmtMsgs(s.p2)}`       : ' (none)');
-  out += '\nOUTPUT:' + (s.p3.length ? `\n${fmtCats(s.p3)}`       : ' (none)');
-
-  // Extra prompts recorded via recordPrompt (render as one compact line each)
-  for (const p of safeArr(s.prompts)) {
-    out += box(`PROMPT: ${p.name}`);
-    if (p.input !== undefined)  out += '\nINPUT:\n'  + bullet(trimLen(cap(typeof p.input === 'string' ? p.input : JSON.stringify(p.input))));
-    if (p.output !== undefined) {
-      // if output looks like {actions:[…]} show compact list, else show single line
-      let rendered = null;
-      try {
-        const obj = typeof p.output === 'string' ? JSON.parse(p.output) : p.output;
-        if (obj && Array.isArray(obj.actions)) rendered = compactActionsList(obj.actions);
-      } catch { /* ignore */ }
-      out += '\nOUTPUT:\n' + (rendered || bullet(trimLen(cap(typeof p.output === 'string' ? p.output : JSON.stringify(p.output)))));
-    }
-    out += '\n';
-  }
-
-  // 5) Extractors raw → compact
-  if (s.extracts.length) {
-    out += box('EXTRACTORS');
-    out += fmtExtractorBlocks(s.extracts) || '\n  (no extractor outputs)\n';
-  }
-
-  // 6) Final actions (compact)
-  out += box('FINAL OUTPUT & ACTIONS');
-  out += s.actions.length ? '\n' + compactActionsList(s.actions) + '\n' : '\n  (none)\n';
-
-  // 7) AI Audit / Identification / Changes
-  if (s.audit.length) {
-    out += box('AI AUDIT');
-    out += '\n' + s.audit.map((x) => bullet(x)).join('\n') + '\n';
-  }
-  if (s.identNotes.length) {
-    out += box('IDENTIFICATION');
-    out += '\n' + s.identNotes.map((x) => bullet(x)).join('\n') + '\n';
-  }
-  if (s.changes.length) {
-    out += box('CHANGES');
-    out += '\n' + s.changes.map((x) => bullet(x)).join('\n') + '\n';
-  }
-
-  out += '\n' + '═'.repeat(42) + '\n';
   console.log(out);
-
   _store.delete(s.id);
 }
 
-// ---------- exports ----------
 module.exports = {
   newContext,
-  // inputs
-  recordBatch,
-  recordPhoto,
-  recordRegoSuccess,
-  recordRegoFail,
-  recordCarCreated,
+  get,
 
-  // prompt stages
+  // high-level
+  recordMessage,
+  recordPhoto: recordPhoto,
+  recordRego: recordRego,
+  recordCarCreate,
+  recordPrompt,
+
+  // legacy used by pipeline
+  recordBatch,
   recordP1,
   recordP2,
   recordP3,
-  recordPrompt,
-
-  // extractors / actions
   recordExtract,
   recordExtractAll,
 
-  // audit / notes
   identSuccess,
   identFail,
   change,
-  auditLine,
 
-  // output
+  auditLine,
   print,
 };

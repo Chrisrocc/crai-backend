@@ -3,8 +3,10 @@ const { z } = require('zod');
 const { chatJSON } = require('./llmClient');
 const P = require('../../prompts/pipelinePrompts');
 const timeline = require('../logging/timelineLogger');
+const qa = require('./qa/qaCheck');
 const ReconditionerCategory = require('../../models/ReconditionerCategory');
 
+// ---------- env / debug ----------
 const DEBUG = String(process.env.PIPELINE_DEBUG || '1').trim() === '1';
 const dbg = (...args) => { if (DEBUG) console.log(...args); };
 
@@ -41,7 +43,7 @@ const ActionsOut = z.object({
 });
 
 /* ================================
-   Helpers (dynamic prompts)
+   Helpers for dynamic prompts
 ================================ */
 function buildAllowedCatsStringSorted(cats = []) {
   if (!Array.isArray(cats) || cats.length === 0) return '"Other"';
@@ -101,18 +103,20 @@ const fmt = (msgs) => (Array.isArray(msgs) ? msgs : [])
   .map((m) => `${m.speaker || 'Unknown'}: '${m.text}'`).join('\n');
 
 /* ================================
-   Duplication rules
+   Duplication Guarantees
 ================================ */
 function applyDuplicationRules(items) {
   const base = Array.isArray(items) ? items : [];
   const out = base.slice();
 
+  // maintain your duplication semantics
   for (const it of base) {
     if (it.category === 'REPAIR') out.push({ ...it, category: 'RECON_APPOINTMENT' });
     if (it.category === 'RECON_APPOINTMENT') out.push({ ...it, category: 'REPAIR' });
     if (it.category === 'DROP_OFF') out.push({ ...it, category: 'NEXT_LOCATION' });
   }
 
+  // Deduplicate (speaker+text+category)
   const seen = new Set();
   const deduped = [];
   for (const it of out) {
@@ -126,59 +130,46 @@ function applyDuplicationRules(items) {
    Step 1–3: Filter → Refine → Categorize
 ================================ */
 async function filterRefineCategorize(batch, tctx) {
-  timeline.recordBatch(tctx, batch); // Messages section
+  timeline.recordBatch(tctx, batch);
 
-  // FILTER
-  const p1Input = fmt(batch);
-  const f = FilterOut.parse(await chatJSON({ system: P.FILTER_SYSTEM, user: p1Input }));
+  const fRaw = await chatJSON({ system: P.FILTER_SYSTEM, user: fmt(batch) });
+  const f = FilterOut.parse(fRaw);
   timeline.recordP1(tctx, f.messages);
-  timeline.recordPrompt(tctx, 'PHOTO_MERGER_SYSTEM', { // if you run it earlier, overwrite here with real I/O
-    inputText: '(handled earlier in pipeline)',
-    outputText: '[attach photo outputs here if you call it in this module]',
-  });
-  timeline.recordPrompt(tctx, 'FILTER_SYSTEM', {
-    inputText: p1Input,
-    outputText: JSON.stringify({ messages: f.messages }),
-  });
+  timeline.recordPrompt(tctx, 'FILTER_SYSTEM', fmt(batch), JSON.stringify(fRaw));
 
-  // REFINE
-  const p2Input = fmt(f.messages);
-  const r = FilterOut.parse(await chatJSON({ system: P.REFINE_SYSTEM, user: p2Input }));
+  const rRaw = await chatJSON({ system: P.REFINE_SYSTEM, user: fmt(f.messages) });
+  const r = FilterOut.parse(rRaw);
   timeline.recordP2(tctx, r.messages);
-  timeline.recordPrompt(tctx, 'REFINE_SYSTEM', {
-    inputText: p2Input,
-    outputText: JSON.stringify({ messages: r.messages }),
-  });
+  timeline.recordPrompt(tctx, 'REFINE_SYSTEM', fmt(f.messages), JSON.stringify(rRaw));
 
-  // CATEGORIZE
+  // Load DB categories (keywords + rules)
   let cats = [];
   try {
     cats = await ReconditionerCategory.find().lean();
   } catch (e) {
-    // still proceed with static prompt
+    timeline.recordPrompt(tctx, 'CATEGORIES_DB', '[load failed]', e.message || 'error');
   }
-  const reconHintsFlat = buildReconHintsFlat(cats);
+
+  const reconHintsFlat = buildReconHintsFlat(cats); // includes keywords + rules
   const categorizeSystem = reconHintsFlat
     ? P.CATEGORIZE_SYSTEM_DYNAMIC(reconHintsFlat)
     : P.CATEGORIZE_SYSTEM;
 
-  const p3Input = fmt(r.messages);
   if (DEBUG) {
     console.log('\n==== PIPELINE DEBUG :: CATEGORIZER (Step 3) ====');
     console.log('Recon hints (keywords + rules):\n' + (reconHintsFlat || '(none)'));
     console.log('\n-- System prompt sent --\n' + categorizeSystem);
-    console.log('\n-- User payload --\n' + (p3Input || '(empty)'));
+    const userPayload = fmt(r.messages);
+    console.log('\n-- User payload --\n' + (userPayload || '(empty)'));
     console.log('==============================================\n');
   }
 
-  const c = CatOut.parse(await chatJSON({ system: categorizeSystem, user: p3Input }));
+  const cRaw = await chatJSON({ system: categorizeSystem, user: fmt(r.messages) });
+  timeline.recordPrompt(tctx, 'CATEGORIZE_SYSTEM', fmt(r.messages), JSON.stringify(cRaw));
+
+  const c = CatOut.parse(cRaw);
   const withDupes = applyDuplicationRules(c.items);
   timeline.recordP3(tctx, withDupes);
-  timeline.recordPrompt(tctx, 'CATEGORIZE_SYSTEM', {
-    inputText: p3Input,
-    outputText: JSON.stringify({ items: withDupes }),
-  });
-
   return { refined: r.messages, categorized: withDupes };
 }
 
@@ -201,26 +192,27 @@ async function extractActions(items, tctx) {
 
     const raw = await chatJSON({ system: sys, user });
     timeline.recordExtract(tctx, label, raw);
-    timeline.recordPrompt(tctx, `EXTRACT_${label.toUpperCase()}`, {
-      inputText: user,
-      outputText: JSON.stringify(raw),
-    });
+    timeline.recordPrompt(tctx, `EXTRACT_${label.toUpperCase()}`, user, JSON.stringify(raw));
 
     const parsed = ActionsOut.safeParse(raw);
     if (parsed.success) actions.push(...parsed.data.actions);
   }
 
   await run('LOCATION_UPDATE', P.EXTRACT_LOCATION_UPDATE, 'location_update');
-  await run('SOLD', P.EXTRACT_SOLD, 'sold');
-  await run('REPAIR', P.EXTRACT_REPAIR, 'repair');
-  await run('READY', P.EXTRACT_READY, 'ready');
-  await run('DROP_OFF', P.EXTRACT_DROP_OFF, 'drop_off');
+  await run('SOLD',             P.EXTRACT_SOLD,            'sold');
+  await run('REPAIR',           P.EXTRACT_REPAIR,          'repair');
+  await run('READY',            P.EXTRACT_READY,           'ready');
+  await run('DROP_OFF',         P.EXTRACT_DROP_OFF,        'drop_off');
   await run('CUSTOMER_APPOINTMENT', P.EXTRACT_CUSTOMER_APPOINTMENT, 'customer_appointment');
 
-  // RECON_APPOINTMENT — DB-driven (keywords/rules/defaults)
+  // RECON extractor (DB-driven; keywords + rules + default services; allow multi-match)
   if (by.RECON_APPOINTMENT.length > 0) {
     let cats = [];
-    try { cats = await ReconditionerCategory.find().lean(); } catch {}
+    try {
+      cats = await ReconditionerCategory.find().lean();
+    } catch (e) {
+      timeline.recordExtract(tctx, 'recon_cats_error', { error: e.message });
+    }
 
     const allowed     = buildAllowedCatsStringSorted(cats);
     const mapKwRules  = buildCatKeywordRuleMapString(cats);
@@ -232,18 +224,19 @@ async function extractActions(items, tctx) {
     if (user) {
       const raw = await chatJSON({ system: sys, user });
       timeline.recordExtract(tctx, 'recon_appointment_db', raw);
-      timeline.recordPrompt(tctx, 'EXTRACT_RECON_APPOINTMENT', {
-        inputText: `Allowed:\n${allowed}\n\nKeywords/Rules:\n${mapKwRules || '(none)'}\n\nDefault services:\n${mapDefaults || '(none)'}\n\nUSER:\n${user}`,
-        outputText: JSON.stringify(raw),
-      });
-
+      timeline.recordPrompt(
+        tctx,
+        'EXTRACT_RECON_APPOINTMENT',
+        `Allowed:\n${allowed}\n\nKeywords/Rules:\n${mapKwRules || '(none)'}\n\nDefault services:\n${mapDefaults || '(none)'}\n\nUSER:\n${user}`,
+        JSON.stringify(raw)
+      );
       const parsed = ActionsOut.safeParse(raw);
       if (parsed.success) actions.push(...parsed.data.actions);
     }
   }
 
-  await run('NEXT_LOCATION', P.EXTRACT_NEXT_LOCATION, 'next_location');
-  await run('TASK', P.EXTRACT_TASK, 'task');
+  await run('NEXT_LOCATION',    P.EXTRACT_NEXT_LOCATION,   'next_location');
+  await run('TASK',             P.EXTRACT_TASK,            'task');
 
   // normalize rego
   for (const a of actions) {
@@ -258,13 +251,23 @@ async function extractActions(items, tctx) {
    Public API
 ================================ */
 async function processBatch(messages, tctx) {
-  // If earlier pipeline stages do Photo Analysis / Rego match / Car create,
-  // call timeline.recordPhotoAnalysis(...) / recordRegoMatch(...) / recordCarCreate(...) in those stages.
+  // Messages box (top)
+  for (const m of messages || []) {
+    timeline.recordMessage(tctx, m.speaker || 'Unknown', m.text || '');
+  }
+
   const { categorized } = await filterRefineCategorize(messages, tctx);
   const actions = await extractActions(categorized, tctx);
 
-  // If you run an AI QA audit after actions, call:
-  // timeline.recordQAAudit(tctx, qaPayload);
+  // AI AUDIT — compact human-friendly lines
+  try {
+    const audit = await qa.audit({ categorized, actions });
+    for (const line of (audit?.lines || [])) {
+      timeline.auditLine(tctx, line);
+    }
+  } catch (e) {
+    timeline.auditLine(tctx, `QA audit failed: ${e.message}`);
+  }
 
   return { actions, categorized };
 }

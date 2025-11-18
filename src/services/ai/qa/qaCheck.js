@@ -5,7 +5,7 @@
 // short, human-readable justifications per action.
 //
 // Usage:
-//   const audit = await runAudit({ batch, refined, categorized, actions });
+//   const audit = await runAudit({ batch, refined, actions });
 //   timeline.recordAudit(tctx, audit); // pretty printing handled by timeline logger
 
 const { z } = require("zod");
@@ -19,7 +19,7 @@ const AuditItem = z.object({
   reason: z.string().default(""),
   // the minimal snippet from source that justifies the verdict
   evidenceText: z.string().default(""),
-  // which source line the snippet came from (index into provided messages)
+  // which source line the snippet came from (index into provided messages, 1-based)
   evidenceSourceIndex: z.number().int().nonnegative().optional(),
 });
 
@@ -73,8 +73,11 @@ Guidelines:
 - INCORRECT: The message contradicts the action (wrong car/detail) or the action invents info not present in any message.
 - UNSURE: The message hints at the action but is too vague to be confident.
 
-Keep reason very short (one sentence). evidenceText must be a minimal quote from the message (not your paraphrase).
-For evidenceSourceIndex, use the 1-based index of the message line you quoted; omit the field if no single line fits.
+Requirements:
+- Keep reason extremely short (one simple sentence).
+- evidenceText must be a minimal direct quote from the message (not your paraphrase).
+- For evidenceSourceIndex, use the 1-based index of the message line you quoted; omit the field if no single line fits.
+- Always include one AuditItem per actionIndex from 0..(actions.length-1); do not skip any.
 
 IMPORTANT: Do not modify actions — this is a READ-ONLY audit.
 `;

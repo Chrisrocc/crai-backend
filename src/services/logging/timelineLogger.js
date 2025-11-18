@@ -120,7 +120,7 @@ function print(ctx) {
     for (const line of s.extractorLines) console.log(`- ${line}`);
   }
 
-  // 3) Final Actions (compact & human)
+  // 3) Final Actions (compact & human, with source message)
   if (s.actions.length) {
     console.log(box('FINAL OUTPUT & ACTIONS'));
     for (const a of s.actions) {
@@ -129,35 +129,54 @@ function print(ctx) {
       if (a.type === 'REPAIR' && a.checklistItem) detail = `, task: ${a.checklistItem}`;
       else if (a.type === 'READY' && a.readiness) detail = `, readiness: ${a.readiness}`;
       else if (a.type === 'DROP_OFF' && a.destination) detail = `, destination: ${a.destination}`;
-      else if (a.type === 'CUSTOMER_APPOINTMENT') detail = `, name: ${a.name}${a.dateTime ? `, dateTime: ${a.dateTime}` : ''}`;
-      else if (a.type === 'RECON_APPOINTMENT') detail = `, category: ${a.category}${a.service ? `, service: ${a.service}` : ''}`;
+      else if (a.type === 'CUSTOMER_APPOINTMENT')
+        detail = `, name: ${a.name}${a.dateTime ? `, dateTime: ${a.dateTime}` : ''}`;
+      else if (a.type === 'RECON_APPOINTMENT')
+        detail = `, category: ${a.category}${a.service ? `, service: ${a.service}` : ''}`;
       else if (a.type === 'NEXT_LOCATION' && a.nextLocation) detail = `, nextLocation: ${a.nextLocation}`;
       else if (a.type === 'TASK' && a.task) detail = `, task: ${a.task}`;
-      console.log(`- ${a.type}: {${car || 'no-rego'}${detail}}`);
+
+      const srcSpeaker = a._sourceSpeaker || '';
+      const srcText = a._sourceText || '';
+      const srcPart = (srcSpeaker || srcText)
+        ? `— ${srcSpeaker || 'Unknown'}: '${srcText}' `
+        : ' ';
+
+      console.log(`- ${a.type} ${srcPart}{${car || 'no-rego'}${detail}}`);
     }
   }
 
   // 4) AI AUDIT (per-action justification)
   if (s.audit && s.audit.items?.length) {
     const sum = s.audit.summary || { total: 0, correct: 0, partial: 0, incorrect: 0, unsure: 0 };
-    console.log(box(`AI AUDIT — total:${sum.total} ✓${sum.correct} ~${sum.partial} ✗${sum.incorrect} ?${sum.unsure}`));
+    console.log(
+      box(`AI AUDIT — total:${sum.total} ✓${sum.correct} ~${sum.partial} ✗${sum.incorrect} ?${sum.unsure}`)
+    );
     for (const it of s.audit.items) {
       const a = s.actions[it.actionIndex];
       if (!a) continue;
       const car = [a.rego, [a.make, a.model].filter(Boolean).join(' ')].filter(Boolean).join(' • ');
       const short =
-        a.type === 'REPAIR' && a.checklistItem ? `— ${a.checklistItem}` :
-        a.type === 'RECON_APPOINTMENT' && (a.category || a.service) ? `— ${[a.category, a.service].filter(Boolean).join(' / ')}` :
-        a.type === 'DROP_OFF' && a.destination ? `— ${a.destination}` :
-        a.type === 'READY' && a.readiness ? `— ${a.readiness}` :
-        a.type === 'CUSTOMER_APPOINTMENT' && a.name ? `— ${a.name}${a.dateTime ? ` @ ${a.dateTime}` : ''}` :
-        a.type === 'NEXT_LOCATION' && a.nextLocation ? `— ${a.nextLocation}` :
-        a.type === 'TASK' && a.task ? `— ${a.task}` : '';
+        a.type === 'REPAIR' && a.checklistItem
+          ? `— ${a.checklistItem}`
+          : a.type === 'RECON_APPOINTMENT' && (a.category || a.service)
+          ? `— ${[a.category, a.service].filter(Boolean).join(' / ')}`
+          : a.type === 'DROP_OFF' && a.destination
+          ? `— ${a.destination}`
+          : a.type === 'READY' && a.readiness
+          ? `— ${a.readiness}`
+          : a.type === 'CUSTOMER_APPOINTMENT' && a.name
+          ? `— ${a.name}${a.dateTime ? ` @ ${a.dateTime}` : ''}`
+          : a.type === 'NEXT_LOCATION' && a.nextLocation
+          ? `— ${a.nextLocation}`
+          : a.type === 'TASK' && a.task
+          ? `— ${a.task}`
+          : '';
 
       console.log(
         `- ${a.type} ${car || ''} ${short} — ${it.verdict}` +
-        (it.evidenceText ? ` — evidence: "${it.evidenceText}"` : '') +
-        (it.evidenceSourceIndex ? ` — from: ${it.evidenceSourceIndex}` : '')
+          (it.evidenceText ? ` — evidence: "${it.evidenceText}"` : '') +
+          (it.evidenceSourceIndex ? ` — from: ${it.evidenceSourceIndex}` : '')
       );
       if (it.reason) console.log(`  reason: ${it.reason}`);
     }

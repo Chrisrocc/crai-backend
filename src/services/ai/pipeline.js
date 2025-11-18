@@ -4,7 +4,7 @@ const { chatJSON } = require('./llmClient');
 const P = require('../../prompts/pipelinePrompts');
 const timeline = require('../logging/timelineLogger');
 const ReconditionerCategory = require('../../models/ReconditionerCategory');
-const { runAudit } = require('./qa/qaCheck'); // ← NEW
+const { runAudit } = require('./qa/qaCheck'); // AI audit
 
 // ---------- env / debug ----------
 const DEBUG = String(process.env.PIPELINE_DEBUG || '1').trim() === '1';
@@ -45,7 +45,6 @@ const ActionsOut = z.object({
 /* ================================
    Helpers for dynamic prompts
 ================================ */
-// (unchanged helpers)
 function buildAllowedCatsStringSorted(cats = []) {
   if (!Array.isArray(cats) || cats.length === 0) return '"Other"';
   const sorted = [...cats].sort((a, b) => {
@@ -56,6 +55,7 @@ function buildAllowedCatsStringSorted(cats = []) {
   });
   return sorted.map((c) => `"${String(c.name).trim()}"`).join(', ');
 }
+
 function buildCatKeywordRuleMapString(cats = []) {
   if (!Array.isArray(cats) || cats.length === 0) return '';
   return cats
@@ -71,6 +71,7 @@ function buildCatKeywordRuleMapString(cats = []) {
     })
     .join('\n');
 }
+
 function buildCatDefaultServiceMapString(cats = []) {
   if (!Array.isArray(cats) || cats.length === 0) return '';
   return cats
@@ -81,6 +82,7 @@ function buildCatDefaultServiceMapString(cats = []) {
     })
     .join('\n');
 }
+
 function buildReconHintsFlat(cats = []) {
   const set = new Set();
   for (const c of (Array.isArray(cats) ? cats : [])) {
@@ -96,7 +98,11 @@ function buildReconHintsFlat(cats = []) {
   if (set.size === 0) return '';
   return Array.from(set).map((s) => `- "${s}"`).join('\n');
 }
-const fmt = (msgs) => (Array.isArray(msgs) ? msgs : []).map((m) => `${m.speaker || 'Unknown'}: '${m.text}'`).join('\n');
+
+const fmt = (msgs) =>
+  (Array.isArray(msgs) ? msgs : [])
+    .map((m) => `${m.speaker || 'Unknown'}: '${m.text}'`)
+    .join('\n');
 
 /* ================================
    Duplication Guarantees
@@ -113,7 +119,10 @@ function applyDuplicationRules(items) {
   const deduped = [];
   for (const it of out) {
     const key = `${it.speaker}||${it.text}||${it.category}`;
-    if (!seen.has(key)) { seen.add(key); deduped.push(it); }
+    if (!seen.has(key)) {
+      seen.add(key);
+      deduped.push(it);
+    }
   }
   return deduped;
 }
@@ -123,6 +132,7 @@ function applyDuplicationRules(items) {
 ================================ */
 async function filterRefineCategorize(batch, tctx) {
   timeline.section(tctx, "MESSAGES", fmt(batch).split("\n"));
+
   const f = FilterOut.parse(await chatJSON({ system: P.FILTER_SYSTEM, user: fmt(batch) }));
   timeline.section(tctx, "FILTER", f.messages.map(m => `${m.speaker}: ${m.text}`));
 
@@ -131,21 +141,34 @@ async function filterRefineCategorize(batch, tctx) {
 
   // Categories (dynamic)
   let cats = [];
-  try { cats = await ReconditionerCategory.find().lean(); } catch {}
+  try {
+    cats = await ReconditionerCategory.find().lean();
+  } catch {}
+
   const reconHintsFlat = buildReconHintsFlat(cats);
-  const categorizeSystem = reconHintsFlat ? P.CATEGORIZE_SYSTEM_DYNAMIC(reconHintsFlat) : P.CATEGORIZE_SYSTEM;
+  const categorizeSystem = reconHintsFlat
+    ? P.CATEGORIZE_SYSTEM_DYNAMIC(reconHintsFlat)
+    : P.CATEGORIZE_SYSTEM;
 
   if (DEBUG) {
     console.log('\n==== PIPELINE DEBUG :: CATEGORIZER (Step 3) ====');
     console.log('Recon hints (keywords + rules):\n' + (reconHintsFlat || '(none)'));
-    console.log('\n-- System prompt sent --\n' + categorizeSystem);
+
     const userPayload = fmt(r.messages);
     console.log('\n-- User payload --\n' + (userPayload || '(empty)'));
+
+    console.log('\n-- System prompt: CATEGORIZE (dynamic) --');
+    console.log('  (full prompt suppressed in logs to keep output clean)');
     console.log('==============================================\n');
   }
 
   const c = CatOut.parse(await chatJSON({ system: categorizeSystem, user: fmt(r.messages) }));
-  timeline.section(tctx, "CATEGORIZE", c.items.map(i => `${i.category} — ${i.speaker}: '${i.text}'`));
+  timeline.section(
+    tctx,
+    "CATEGORIZE",
+    c.items.map(i => `${i.category} — ${i.speaker}: '${i.text}'`)
+  );
+
   const withDupes = applyDuplicationRules(c.items);
   return { refined: r.messages, categorized: withDupes };
 }
@@ -159,16 +182,65 @@ async function extractActions(items, tctx) {
     DROP_OFF: [], CUSTOMER_APPOINTMENT: [], RECON_APPOINTMENT: [],
     NEXT_LOCATION: [], TASK: [], OTHER: [],
   };
-  for (const it of items) (by[it.category] || by.OTHER).push(it);
+
+  for (const it of (Array.isArray(items) ? items : [])) {
+    (by[it.category] || by.OTHER).push(it);
+  }
 
   const actions = [];
+
+  function findBestSource(candidates = [], act = {}) {
+    if (!Array.isArray(candidates) || candidates.length === 0) return null;
+
+    const rego = (act.rego || '').replace(/\s+/g, '').toUpperCase();
+    const make = String(act.make || '').toLowerCase();
+    const model = String(act.model || '').toLowerCase();
+
+    // 1) Exact rego (whitespace-insensitive) in text
+    if (rego) {
+      for (const c of candidates) {
+        const txt = String(c.text || '');
+        const norm = txt.replace(/\s+/g, '').toUpperCase();
+        if (norm.includes(rego)) return c;
+      }
+    }
+
+    // 2) Make + model tokens in text
+    const tokens = [make, model].filter(Boolean);
+    if (tokens.length) {
+      for (const c of candidates) {
+        const txt = String(c.text || '').toLowerCase();
+        if (tokens.every((t) => txt.includes(t))) {
+          return c;
+        }
+      }
+    }
+
+    // 3) Fallback: first candidate
+    return candidates[0] || null;
+  }
+
   async function run(cat, sys, label) {
-    const user = by[cat].map((i) => `${i.speaker}: '${i.text}'`).join('\n');
+    const candidates = by[cat];
+    const user = (Array.isArray(candidates) ? candidates : [])
+      .map((i) => `${i.speaker}: '${i.text}'`)
+      .join('\n');
     if (!user) return;
+
     const raw = await chatJSON({ system: sys, user });
     timeline.prompt(tctx, label, { inputText: user, outputText: JSON.stringify(raw) });
+
     const parsed = ActionsOut.safeParse(raw);
-    if (parsed.success) actions.push(...parsed.data.actions);
+    if (parsed.success) {
+      for (const act of parsed.data.actions) {
+        const src = findBestSource(candidates, act);
+        actions.push({
+          ...act,
+          _sourceSpeaker: src?.speaker || '',
+          _sourceText: src?.text || '',
+        });
+      }
+    }
   }
 
   await run('LOCATION_UPDATE', P.EXTRACT_LOCATION_UPDATE, 'EXTRACT_LOCATION_UPDATE');
@@ -180,13 +252,20 @@ async function extractActions(items, tctx) {
 
   if (by.RECON_APPOINTMENT.length > 0) {
     let cats = [];
-    try { cats = await ReconditionerCategory.find().lean(); } catch {}
+    try {
+      cats = await ReconditionerCategory.find().lean();
+    } catch {}
+
     const allowed     = buildAllowedCatsStringSorted(cats);
     const mapKwRules  = buildCatKeywordRuleMapString(cats);
     const mapDefaults = buildCatDefaultServiceMapString(cats);
 
     const sys = P.EXTRACT_RECON_APPOINTMENT_FROM_DB(allowed, mapKwRules, mapDefaults);
-    const user = by.RECON_APPOINTMENT.map((i) => `${i.speaker}: '${i.text}'`).join('\n');
+    const candidates = by.RECON_APPOINTMENT;
+    const user = (Array.isArray(candidates) ? candidates : [])
+      .map((i) => `${i.speaker}: '${i.text}'`)
+      .join('\n');
+
     if (user) {
       const raw = await chatJSON({ system: sys, user });
       timeline.prompt(tctx, 'EXTRACT_RECON_APPOINTMENT', {
@@ -194,15 +273,27 @@ async function extractActions(items, tctx) {
         outputText: JSON.stringify(raw),
       });
       const parsed = ActionsOut.safeParse(raw);
-      if (parsed.success) actions.push(...parsed.data.actions);
+      if (parsed.success) {
+        for (const act of parsed.data.actions) {
+          const src = findBestSource(candidates, act);
+          actions.push({
+            ...act,
+            _sourceSpeaker: src?.speaker || '',
+            _sourceText: src?.text || '',
+          });
+        }
+      }
     }
   }
 
   await run('NEXT_LOCATION', P.EXTRACT_NEXT_LOCATION, 'EXTRACT_NEXT_LOCATION');
   await run('TASK', P.EXTRACT_TASK, 'EXTRACT_TASK');
 
+  // Normalize rego
   for (const a of actions) {
-    if ('rego' in a && a.rego) a.rego = a.rego.replace(/\s+/g, '').toUpperCase();
+    if ('rego' in a && a.rego) {
+      a.rego = a.rego.replace(/\s+/g, '').toUpperCase();
+    }
   }
 
   timeline.actions(tctx, actions);

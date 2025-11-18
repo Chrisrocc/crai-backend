@@ -1,14 +1,11 @@
-// backend/src/services/ai/pipeline.js
+// src/services/ai/pipeline.js
 const { z } = require('zod');
 const { chatJSON } = require('./llmClient');
 const P = require('../../prompts/pipelinePrompts');
 const timeline = require('../logging/timelineLogger');
 const ReconditionerCategory = require('../../models/ReconditionerCategory');
-const { runQA } = require('./qa/qaCheck');
 
-// ---------- env / debug ----------
-const DEBUG = String(process.env.PIPELINE_DEBUG || '1').trim() === '1'; // default ON
-const QA_ON = String(process.env.PIPELINE_QA || '1').trim() === '1'; // default ON unless disabled
+const DEBUG = String(process.env.PIPELINE_DEBUG || '1').trim() === '1';
 const dbg = (...args) => { if (DEBUG) console.log(...args); };
 
 /* ================================
@@ -44,8 +41,7 @@ const ActionsOut = z.object({
 });
 
 /* ================================
-   Helpers for dynamic prompts
-   (keywords + rules)
+   Helpers (dynamic prompts)
 ================================ */
 function buildAllowedCatsStringSorted(cats = []) {
   if (!Array.isArray(cats) || cats.length === 0) return '"Other"';
@@ -74,6 +70,17 @@ function buildCatKeywordRuleMapString(cats = []) {
     .join('\n');
 }
 
+function buildCatDefaultServiceMapString(cats = []) {
+  if (!Array.isArray(cats) || cats.length === 0) return '';
+  return cats
+    .map((c) => {
+      const name = String(c.name || '').trim();
+      const def = String(c.defaultService || '').trim();
+      return `${name}: "${def}"`;
+    })
+    .join('\n');
+}
+
 function buildReconHintsFlat(cats = []) {
   const set = new Set();
   for (const c of (Array.isArray(cats) ? cats : [])) {
@@ -94,7 +101,7 @@ const fmt = (msgs) => (Array.isArray(msgs) ? msgs : [])
   .map((m) => `${m.speaker || 'Unknown'}: '${m.text}'`).join('\n');
 
 /* ================================
-   Duplication Guarantees
+   Duplication rules
 ================================ */
 function applyDuplicationRules(items) {
   const base = Array.isArray(items) ? items : [];
@@ -106,7 +113,6 @@ function applyDuplicationRules(items) {
     if (it.category === 'DROP_OFF') out.push({ ...it, category: 'NEXT_LOCATION' });
   }
 
-  // Dedup by (speaker|text|category)
   const seen = new Set();
   const deduped = [];
   for (const it of out) {
@@ -120,39 +126,58 @@ function applyDuplicationRules(items) {
    Step 1–3: Filter → Refine → Categorize
 ================================ */
 async function filterRefineCategorize(batch, tctx) {
-  timeline.recordBatch(tctx, batch);
+  timeline.recordBatch(tctx, batch); // Messages section
 
-  const f = FilterOut.parse(await chatJSON({ system: P.FILTER_SYSTEM, user: fmt(batch) }));
+  // FILTER
+  const p1Input = fmt(batch);
+  const f = FilterOut.parse(await chatJSON({ system: P.FILTER_SYSTEM, user: p1Input }));
   timeline.recordP1(tctx, f.messages);
+  timeline.recordPrompt(tctx, 'PHOTO_MERGER_SYSTEM', { // if you run it earlier, overwrite here with real I/O
+    inputText: '(handled earlier in pipeline)',
+    outputText: '[attach photo outputs here if you call it in this module]',
+  });
+  timeline.recordPrompt(tctx, 'FILTER_SYSTEM', {
+    inputText: p1Input,
+    outputText: JSON.stringify({ messages: f.messages }),
+  });
 
-  const r = FilterOut.parse(await chatJSON({ system: P.REFINE_SYSTEM, user: fmt(f.messages) }));
+  // REFINE
+  const p2Input = fmt(f.messages);
+  const r = FilterOut.parse(await chatJSON({ system: P.REFINE_SYSTEM, user: p2Input }));
   timeline.recordP2(tctx, r.messages);
+  timeline.recordPrompt(tctx, 'REFINE_SYSTEM', {
+    inputText: p2Input,
+    outputText: JSON.stringify({ messages: r.messages }),
+  });
 
-  // Load DB categories (keywords + rules)
+  // CATEGORIZE
   let cats = [];
   try {
     cats = await ReconditionerCategory.find().lean();
   } catch (e) {
-    timeline.recordP3(tctx, { warn: 'failed to load categories for dynamic categorizer', error: e.message });
+    // still proceed with static prompt
   }
-
   const reconHintsFlat = buildReconHintsFlat(cats);
   const categorizeSystem = reconHintsFlat
     ? P.CATEGORIZE_SYSTEM_DYNAMIC(reconHintsFlat)
     : P.CATEGORIZE_SYSTEM;
 
+  const p3Input = fmt(r.messages);
   if (DEBUG) {
     console.log('\n==== PIPELINE DEBUG :: CATEGORIZER (Step 3) ====');
     console.log('Recon hints (keywords + rules):\n' + (reconHintsFlat || '(none)'));
     console.log('\n-- System prompt sent --\n' + categorizeSystem);
-    const userPayload = fmt(r.messages);
-    console.log('\n-- User payload --\n' + (userPayload || '(empty)'));
+    console.log('\n-- User payload --\n' + (p3Input || '(empty)'));
     console.log('==============================================\n');
   }
 
-  const c = CatOut.parse(await chatJSON({ system: categorizeSystem, user: fmt(r.messages) }));
+  const c = CatOut.parse(await chatJSON({ system: categorizeSystem, user: p3Input }));
   const withDupes = applyDuplicationRules(c.items);
   timeline.recordP3(tctx, withDupes);
+  timeline.recordPrompt(tctx, 'CATEGORIZE_SYSTEM', {
+    inputText: p3Input,
+    outputText: JSON.stringify({ items: withDupes }),
+  });
 
   return { refined: r.messages, categorized: withDupes };
 }
@@ -174,15 +199,13 @@ async function extractActions(items, tctx) {
     const user = by[cat].map((i) => `${i.speaker}: '${i.text}'`).join('\n');
     if (!user) return;
 
-    if (DEBUG && label !== 'recon_appointment_db') {
-      console.log(`\n==== PIPELINE DEBUG :: EXTRACTOR [${label}] ====`);
-      console.log('-- System prompt sent --\n' + sys);
-      console.log('\n-- User payload --\n' + user);
-      console.log('==============================================\n');
-    }
-
     const raw = await chatJSON({ system: sys, user });
     timeline.recordExtract(tctx, label, raw);
+    timeline.recordPrompt(tctx, `EXTRACT_${label.toUpperCase()}`, {
+      inputText: user,
+      outputText: JSON.stringify(raw),
+    });
+
     const parsed = ActionsOut.safeParse(raw);
     if (parsed.success) actions.push(...parsed.data.actions);
   }
@@ -194,33 +217,26 @@ async function extractActions(items, tctx) {
   await run('DROP_OFF', P.EXTRACT_DROP_OFF, 'drop_off');
   await run('CUSTOMER_APPOINTMENT', P.EXTRACT_CUSTOMER_APPOINTMENT, 'customer_appointment');
 
-  // RECON extractor (DB-driven; keywords + rules)
+  // RECON_APPOINTMENT — DB-driven (keywords/rules/defaults)
   if (by.RECON_APPOINTMENT.length > 0) {
     let cats = [];
-    try {
-      cats = await ReconditionerCategory.find().lean();
-    } catch (e) {
-      timeline.recordExtract(tctx, 'recon_cats_error', { error: e.message });
-    }
+    try { cats = await ReconditionerCategory.find().lean(); } catch {}
 
     const allowed     = buildAllowedCatsStringSorted(cats);
     const mapKwRules  = buildCatKeywordRuleMapString(cats);
+    const mapDefaults = buildCatDefaultServiceMapString(cats);
 
-    const sys = P.EXTRACT_RECON_APPOINTMENT_FROM_DB(allowed, mapKwRules);
+    const sys = P.EXTRACT_RECON_APPOINTMENT_FROM_DB(allowed, mapKwRules, mapDefaults);
     const user = by.RECON_APPOINTMENT.map((i) => `${i.speaker}: '${i.text}'`).join('\n');
-
-    if (DEBUG) {
-      console.log('\n==== PIPELINE DEBUG :: RECON EXTRACTOR (Step 4) ====');
-      console.log('Allowed categories:\n' + allowed);
-      console.log('\nKeyword/rule mapping:\n' + (mapKwRules || '(none)'));
-      console.log('\n-- System prompt sent --\n' + sys);
-      console.log('\n-- User payload --\n' + (user || '(empty)'));
-      console.log('==================================================\n');
-    }
 
     if (user) {
       const raw = await chatJSON({ system: sys, user });
       timeline.recordExtract(tctx, 'recon_appointment_db', raw);
+      timeline.recordPrompt(tctx, 'EXTRACT_RECON_APPOINTMENT', {
+        inputText: `Allowed:\n${allowed}\n\nKeywords/Rules:\n${mapKwRules || '(none)'}\n\nDefault services:\n${mapDefaults || '(none)'}\n\nUSER:\n${user}`,
+        outputText: JSON.stringify(raw),
+      });
+
       const parsed = ActionsOut.safeParse(raw);
       if (parsed.success) actions.push(...parsed.data.actions);
     }
@@ -242,22 +258,13 @@ async function extractActions(items, tctx) {
    Public API
 ================================ */
 async function processBatch(messages, tctx) {
-  const { refined, categorized } = await filterRefineCategorize(messages, tctx);
+  // If earlier pipeline stages do Photo Analysis / Rego match / Car create,
+  // call timeline.recordPhotoAnalysis(...) / recordRegoMatch(...) / recordCarCreate(...) in those stages.
+  const { categorized } = await filterRefineCategorize(messages, tctx);
   const actions = await extractActions(categorized, tctx);
 
-  // -------- QA PASS --------
-  if (QA_ON) {
-    try {
-      const report = await runQA({ refined, actions, tctx });
-      timeline.recordQA(tctx, report);
-      for (const it of (report.items || [])) {
-        timeline.recordQAItem(tctx, it);
-      }
-    } catch (e) {
-      // Log a synthetic QA error into the timeline extracts for visibility
-      timeline.recordExtract(tctx, 'qa_error', { error: e.message || String(e) });
-    }
-  }
+  // If you run an AI QA audit after actions, call:
+  // timeline.recordQAAudit(tctx, qaPayload);
 
   return { actions, categorized };
 }

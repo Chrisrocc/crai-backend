@@ -136,8 +136,20 @@ async function filterRefineCategorize(batch, tctx) {
   const f = FilterOut.parse(await chatJSON({ system: P.FILTER_SYSTEM, user: fmt(batch) }));
   timeline.section(tctx, "FILTER", f.messages.map(m => `${m.speaker}: ${m.text}`));
 
+  // If filter found nothing actionable, bail early
+  if (!f.messages.length) {
+    timeline.section(tctx, "REFINE", []);
+    timeline.section(tctx, "CATEGORIZE", []);
+    return { refined: [], categorized: [] };
+  }
+
   const r = FilterOut.parse(await chatJSON({ system: P.REFINE_SYSTEM, user: fmt(f.messages) }));
   timeline.section(tctx, "REFINE", r.messages.map(m => `${m.speaker}: ${m.text}`));
+
+  if (!r.messages.length) {
+    timeline.section(tctx, "CATEGORIZE", []);
+    return { refined: [], categorized: [] };
+  }
 
   // Categories (dynamic)
   let cats = [];
@@ -296,8 +308,6 @@ async function extractActions(items, tctx) {
     }
   }
 
-  // For logging: keep the full, raw action set
-  timeline.actions(tctx, actions);
   return actions;
 }
 
@@ -306,11 +316,11 @@ async function extractActions(items, tctx) {
 ================================ */
 /**
  * Apply AI audit as a gatekeeper.
- * We drop any action the audit marks as INCORRECT.
- * CORRECT / PARTIAL / UNSURE currently pass through.
+ * Only actions marked CORRECT or PARTIAL are allowed through.
+ * UNSURE / INCORRECT are dropped.
  */
 function applyAuditGate(actions, audit) {
-  if (!audit || !Array.isArray(audit.items)) return actions;
+  if (!audit || !Array.isArray(audit.items)) return [];
 
   const verdictByIndex = new Map();
   for (const item of audit.items) {
@@ -322,11 +332,10 @@ function applyAuditGate(actions, audit) {
   const gated = [];
   actions.forEach((a, idx) => {
     const verdict = verdictByIndex.get(idx);
-    // Only hard-block actions explicitly marked INCORRECT.
-    if (verdict === 'INCORRECT') {
-      return; // drop hallucination / bad action
+    if (verdict === 'CORRECT' || verdict === 'PARTIAL') {
+      gated.push(a);
     }
-    gated.push(a);
+    // UNSURE / INCORRECT are silently dropped
   });
 
   return gated;
@@ -339,17 +348,42 @@ async function processBatch(messages, tctx) {
   // 1) Filter / Refine / Categorize
   const { refined, categorized } = await filterRefineCategorize(messages, tctx);
 
+  // If nothing categorized, no actions / no audit
+  if (!categorized.length) {
+    const emptyAudit = {
+      summary: { total: 0, correct: 0, partial: 0, incorrect: 0, unsure: 0 },
+      items: [],
+    };
+    timeline.recordAudit(tctx, emptyAudit);
+    timeline.actions(tctx, []);
+    return { actions: [], categorized: [] };
+  }
+
   // 2) Extract actions (raw, potentially with some hallucinations)
-  const actions = await extractActions(categorized, tctx);
+  const rawActions = await extractActions(categorized, tctx);
+
+  // If no actions, skip audit
+  if (!rawActions.length) {
+    const emptyAudit = {
+      summary: { total: 0, correct: 0, partial: 0, incorrect: 0, unsure: 0 },
+      items: [],
+    };
+    timeline.recordAudit(tctx, emptyAudit);
+    timeline.actions(tctx, []);
+    return { actions: [], categorized };
+  }
 
   // 3) AI AUDIT (read-only, per-action justification)
-  const audit = await runAudit({ batch: messages, refined, actions });
+  const audit = await runAudit({ batch: messages, refined, actions: rawActions });
   timeline.recordAudit(tctx, audit);
 
-  // 4) Gatekeeper: drop actions marked INCORRECT by the audit
-  const gatedActions = applyAuditGate(actions, audit);
+  // 4) Gatekeeper: only allow CORRECT / PARTIAL through
+  const gatedActions = applyAuditGate(rawActions, audit);
 
-  // What we return to the caller is the cleaned, gated list
+  // 5) Log only gated, trusted actions
+  timeline.actions(tctx, gatedActions);
+
+  // 6) Return clean actions
   return { actions: gatedActions, categorized };
 }
 

@@ -9,13 +9,19 @@ Your goal is to convert messages from a car yard business group chat into action
 Return STRICT minified JSON only:
 {"messages":[{"speaker":"","text":""}]}
 
+Hard rules:
+- DO NOT invent cars, regos, people, locations, or times.
+- Use ONLY information present in the input messages.
+- If you are not sure how to attach a photo to a text, keep the messages separate and simple.
+- If nothing actionable can be formed, return {"messages":[]}.
+
 Input format
 - Text message input will be in the format {"speaker": "Christian", "text": "Customer coming to see this today at 12"} 
 - Photo messages will be analyzed and converted into text with [PHOTO] preceding the analysis, the format will look like {"speaker": "Christian", "text": "[PHOTO] Photo: Grey Volkswagen Golf R, rego 1OY2AJ"}. 
-    - So [PHOTO] means that the message was an analysed photo 
+  - [PHOTO] means that the message was an analysed photo.
 
-All photo messages need to be logically attached to a text message. 
-For example 
+All photo messages need to be logically attached to a text message when it is clearly referring to that photo. 
+For example:
 
 [
   {"speaker": "Christian", "text": "Customer coming to see this today at 12"},
@@ -24,72 +30,21 @@ For example
   {"speaker": "Christian", "text": "this is at haythams"}
 ]
 
+"Customer coming to see this today at 12" clearly refers to the first photo, so the actionable merged message is:
+"[PHOTO] Customer coming to see Grey Volkswagen Golf R, rego 1OY2AJ today at 12"
 
-{"speaker": "Christian", "text": "Customer coming to see this today at 12"} in this message "this" would refer to the grey volkswagen [PHOTO] Photo: Grey Volkswagen Golf R, rego 1OY2AJ because in the group chat the user would say "customer coming to see this" + photo of the car. So from this the actionable point would be "Customer is coming to the Grey Volkswagen Golf R, rego 1OY2AJ today at 12" 
+The remaining photo and text become:
+"[PHOTO] White Ford Falcon FGX rego F6X175 is at Haytham's"
 
-As there is now another photo message and a text message, and just logically then, the second actionable point would be "White Ford Falcon FGX rego F6X175 is at Haytham's"
-
-However remember to always use logic as some cases two photos might belong to one message. Where multiple photos clearly relate to one message using “these, or a similar term” combine them logically into one message
+If multiple photos clearly relate to one message using “these” or similar, combine them:
 
 {"speaker": "Christian", "text": "these are at haythams"}
-{"speaker": "Christian", "text": "[PHOTO] Photo: Grey Volkswagen Golf R, rego 1OY2AJ"},
-{"speaker": "Christian", "text": "[PHOTO] Photo: White Ford Falcon FGX rego F6X175"},
+{"speaker": "Christian", "text": "[PHOTO] Photo: Grey Volkswagen Golf R, rego 1OY2AJ"}
+{"speaker": "Christian", "text": "[PHOTO] Photo: White Ford Falcon FGX rego F6X175"}
 
-The actionable point would be 
+→ "[PHOTO] Grey Volkswagen Golf R, rego 1OY2AJ and White Ford Falcon FGX rego F6X175 are at Haytham's"
 
-Grey Volkswagen Golf R, rego 1OY2AJ and White Ford Falcon FGX rego F6X175 are at Haytham's 
-
-Here are some examples of input and output 
-
-[
-  {
-    "input": [
-      {"speaker": "Christian", "text": "Customer coming to see this today at 12"},
-      {"speaker": "Christian", "text": "[PHOTO] Photo analysis: Grey Volkswagen Golf R, rego 1OY2AJ"}
-    ],
-    "output": {
-      "messages": [
-        {"speaker": "Christian", "text": "[PHOTO] Customer coming to see Grey Volkswagen Golf R, rego 1OY2AJ today at 12"}
-      ]
-    }
-  },
-
-  {
-    "input": [
-      {"speaker": "Christian", "text": "[PHOTO] Photo analysis: oil leak on floor under engine bay"},
-      {"speaker": "Christian", "text": "under the Amarok AYX900"}
-    ],
-    "output": {
-      "messages": [
-        {"speaker": "Christian", "text": "[PHOTO] Oil leak under the Amarok AYX900"}
-      ]
-    }
-  },
-
-  {
-    "input": [
-      {"speaker": "Christian", "text": "[PHOTO] Photo analysis: dashboard light visible but unclear"},
-      {"speaker": "Christian", "text": "belongs to the Pajero"}
-    ],
-    "output": {
-      "messages": [
-        {"speaker": "Christian", "text": "[PHOTO] Unclear dashboard warning light on the Pajero"}
-      ]
-    }
-  },
-
-  {
-    "input": [
-      {"speaker": "Christian", "text": "[PHOTO] Photo analysis: set of alloy wheels"},
-      {"speaker": "Christian", "text": "fit these to the Hilux"}
-    ],
-    "output": {
-      "messages": [
-        {"speaker": "Christian", "text": "[PHOTO] Set of alloy wheels to fit on the Hilux"}
-      ]
-    }
-  }
-]
+If you cannot clearly decide, keep messages separate and DO NOT guess.
 `;
 
 // =======================
@@ -101,6 +56,12 @@ You convert WhatsApp/Telegram style notes from a car yard business group chat in
 Return STRICT minified JSON only:
 {"messages":[{"speaker":"","text":""}]}
 
+Hard rules:
+- DO NOT invent cars, regos, people, locations, dates, or times.
+- Use ONLY details that are explicitly present or trivially implied by the text.
+- If a line is not clearly actionable for the business, DROP it.
+- If no actionable messages remain, return {"messages":[]} exactly.
+
 Input format:
 Each sub-message starts with a sender label like "Christian:" or "Unknown:". Some lines may start with "[PHOTO]" if they already contain attached photo analysis text — treat these simply as part of the message.
 
@@ -111,7 +72,6 @@ Core rules:
 - Merge or rewrite fragmented sentences so each final message is clear and standalone.
 - Normalize casual or shorthand phrasing into full, natural statements.
 - Do NOT include irrelevant chatter or system text.
-- If no actionable messages remain, return {"messages":[]}.
 
 Style rules (examples condensed):
 
@@ -178,23 +138,26 @@ Style rules (examples condensed):
     "Wash the XR6 and Pajero" → 
     - "Wash XR6"
     - "Wash Pajero"
-
-If no actionable content remains, return {"messages":[]}.
 `;
 
 // =======================
 // Step 2: Refine (canonical wording + conditional splitting + pickup inference)
 // =======================
 const REFINE_SYSTEM = `
-
 You normalize actionable vehicle statements into clear, canonical wording (without inventing or assuming facts).
 
 Return STRICT minified JSON only:
 {"messages":[{"speaker":"","text":""}]}
 
+Hard rules:
+- DO NOT invent new cars, regos, locations, dates, or people.
+- DO NOT turn non-actionable chit-chat into an action.
+- Use ONLY information already in the text.
+- If a message is already clear, keep it almost unchanged.
+- If nothing actionable remains, return {"messages":[]}.
+
 Primary goal:
 - Normalize grammar, casing, and phrasing for clarity and consistency.
-- DO NOT infer new facts, people, locations, or intent that are not explicitly stated.
 - Preserve every correct name, vehicle, rego, and relationship exactly as provided.
 
 ----------------------------------
@@ -226,7 +189,7 @@ CORE NORMALIZATION RULES
 NAME-PRESERVATION & ROLE LOGIC
 ----------------------------------
 ⚠️ The most critical rule:
-- **NEVER replace or reinterpret people’s names.**
+- NEVER replace or reinterpret people’s names.
 - A name mentioned inside the message always refers to that person — do NOT confuse it with the sender’s name.
 
 Examples:
@@ -281,21 +244,31 @@ QUALITY REQUIREMENTS
 - Never confuse sender and mentioned names.
 - Never drop valid context.
 - Ensure every message is complete, concise, and stands alone logically.
-
-If nothing actionable remains, return:
-{"messages":[]}
-
 `;
 
 // =======================
-// Step 3: Categorize (DB-driven hook for RECON via keywords)
+// Step 3: Categorize (static)
 // =======================
 const CATEGORIZE_SYSTEM = `
-You are provided with actionable points from telegram messages from a car yard group chat. Each line starts with a sender (e.g., "Christian: …"). Some lines may begin with "[PHOTO]". Preserve the sender and any "[PHOTO]".
-Assign exactly one canonical category per output line. If a line legitimately belongs to two categories, DUPLICATE the line so each copy has one category.
+You are provided with actionable points from telegram messages from a car yard group chat. 
+Each input line starts with a sender (e.g., "Christian: …"). Some lines may begin with "[PHOTO]". 
+You MUST preserve the sender and the exact text.
+
+Your job:
+- For every input line you receive, output one or more items in "items".
+- DO NOT invent new messages, cars, people, or regos.
+- DO NOT output examples that are not in the input.
+- If there are zero input lines, return {"items":[]}.
 
 Return STRICT minified JSON only:
 {"items":[{"speaker":"","text":"","category":""}]}
+
+Input→output constraints:
+- speaker in each output item MUST be copied exactly from some input line.
+- text in each output item MUST be copied exactly from some input line.
+- Most of the time, you will output exactly one item per input line.
+- You may duplicate a line into multiple items ONLY to assign multiple categories for that exact same text (see duplication rules below).
+- You MUST NEVER invent new text, new cars, or new senders.
 
 CANONICAL CATEGORIES:
 - LOCATION_UPDATE
@@ -326,36 +299,42 @@ Triggers:
 - LOCATION_UPDATE: a car’s location has changed/is changing ("is at …", "from … to …").
 - CUSTOMER_APPOINTMENT: when a customer is scheduled to view or pick up a particular car.
 - NEXT_LOCATION: future destination intent only ("needs to go to …", "next location …", "to … when …").
-- TASK: people logistics or chores (photos, fuel, make a spot, order part, clean/detail, **bring out / prep**, etc).
+- TASK: people logistics or chores (photos, fuel, make a spot, order part, clean/detail, bring out, prep, etc).
 - REPAIR: mechanical/body/tyre/parts work needed (bonnet, oil leak, suspension).
 - SOLD: car is sold.
 - OTHER: useful notes that aren’t actionable.
 
-Dual-category rules:
-- If a car is going somewhere for service/RWC/repairs, produce BOTH: (DROP_OFF or LOCATION_UPDATE) AND REPAIR (duplicate the line with one category each).
-- If a line implies a viewing AND a prep/movement instruction, DUPLICATE as CUSTOMER_APPOINTMENT + TASK (or DROP_OFF if destination named).
-- If a line is categorized as REPAIR, duplicate it as RECON_APPOINTMENT too.
-  Example:
-  Christian: "Toyota Camry TGS655 needs taillights replaced."
-  →
-  REPAIR - Christian: "Toyota Camry TGS655 needs taillights replaced."
-  RECON_APPOINTMENT - Christian: "Toyota Camry TGS655 needs taillights replaced."
-- If a line is categorized as DROP_OFF, duplicate it as NEXT_LOCATION (not vice versa).
-  Example:
-  Christian: "Drop off Dmax to Capital."
-  →
-  DROP_OFF - Christian: "Drop off Dmax to Capital."
-  NEXT_LOCATION - Christian: "Drop off Dmax to Capital."
+Duplication rules (ONLY for the same text):
+- If a car is going somewhere for service/RWC/repairs, you may produce BOTH: (DROP_OFF or LOCATION_UPDATE) AND REPAIR (duplicate the same line with one category each).
+- If a line implies a viewing AND a prep/movement instruction, you may duplicate as CUSTOMER_APPOINTMENT + TASK (or DROP_OFF if destination named).
+- If a line is categorized as REPAIR, you may duplicate it as RECON_APPOINTMENT too.
+- If a line is categorized as DROP_OFF, you may duplicate it as NEXT_LOCATION (not vice versa).
 `;
 
+// =======================
 // Step 3: Categorize (dynamic; uses keywords + rules)
+// =======================
 function CATEGORIZE_SYSTEM_DYNAMIC(RECON_KEYWORDS_FLAT) {
   return `
-You are provided with sub-messages from a car yard group chat. Each line starts with a sender (e.g., "Christian: …"). Some lines may begin with "[PHOTO]". Preserve the sender and any "[PHOTO]".
-Assign exactly one canonical category per output line. If a line legitimately belongs to two categories, DUPLICATE the line so each copy has one category.
+You are provided with sub-messages from a car yard group chat. 
+Each input line starts with a sender (e.g., "Christian: …"). Some lines may begin with "[PHOTO]". 
+You MUST preserve the sender and the exact text.
+
+Your job:
+- For every input line you receive, output one or more items in "items".
+- DO NOT invent new messages, cars, people, or regos.
+- DO NOT output examples that are not in the input.
+- If there are zero input lines, return {"items":[]}.
 
 Return STRICT minified JSON only:
 {"items":[{"speaker":"","text":"","category":""}]}
+
+Input→output constraints:
+- speaker in each output item MUST be copied exactly from some input line.
+- text in each output item MUST be copied exactly from some input line.
+- Most of the time, you will output exactly one item per input line.
+- You may duplicate a line into multiple items ONLY to assign multiple categories for that exact same text (see duplication rules below).
+- You MUST NEVER invent new text, new cars, or new senders.
 
 CANONICAL CATEGORIES:
 - LOCATION_UPDATE
@@ -369,7 +348,7 @@ CANONICAL CATEGORIES:
 - OTHER
 - NEXT_LOCATION
 
-Recon hints (case-insensitive). If any of the following words/phrases appear in the line, that strongly signals RECON_APPOINTMENT. The list below is built from the user's configured **keywords + rules**:
+Recon hints (case-insensitive). If any of the following words/phrases appear in the line, that strongly signals RECON_APPOINTMENT. The list below is built from the user's configured keywords + rules:
 ${RECON_KEYWORDS_FLAT || '(none)'}
 
 Use these triggers only:
@@ -384,27 +363,31 @@ Use these triggers only:
 - SOLD: car is sold.
 - OTHER: useful notes that aren’t actionable.
 
-Duplication:
-- If the same line is both a movement (DROP_OFF/LOCATION_UPDATE) and a service job, duplicate as DROP_OFF (or LOCATION_UPDATE) and REPAIR.
+Duplication rules (ONLY for the same text):
+- If the same line is both a movement (DROP_OFF/LOCATION_UPDATE) and a service job, you may duplicate as DROP_OFF (or LOCATION_UPDATE) and REPAIR.
+- If a line is categorized as REPAIR, you may also categorize that same text as RECON_APPOINTMENT.
+- If a line is categorized as DROP_OFF, you may also categorize that same text as NEXT_LOCATION.
 `;
 }
-
 
 // ===================================================================
 // Extractors — ALL actions include: rego, make, model, badge, description, year
 // ===================================================================
-
 const VEHICLE_FIELDS_HELP = `
 Field requirements (ORDER MATTERS):
-- rego: UPPERCASE, no spaces, "" if not provided.
-- make: Proper Case, "" if unknown (infer from model if unambiguous).
-- model: Proper Case or common formatting (e.g., "i30", "BT-50").
+- rego: UPPERCASE, no spaces, "" if not provided. Never invent a rego.
+- make: Proper Case, "" if unknown (infer from model only if unambiguous).
+- model: Proper Case or common formatting (e.g., "i30", "BT-50"). "" if unknown.
 - badge: series/variant if present (e.g., "SR5", "XLT", "GX", "ST-L"), else "".
 - description: short comma-separated helpful identifiers (color/accessories/notes), e.g., "white, bulbar, roof racks". "" if none.
 - year: 4-digit if present, else "".
 
 Always place identification fields first in the object in this exact order:
 rego, make, model, badge, description, year
+
+Hard rules:
+- Use ONLY details present in the input lines.
+- DO NOT invent or guess vehicle fields. If a field is not clearly stated, leave it as "".
 `;
 
 // ----------------------- LOCATION_UPDATE -----------------------
@@ -417,6 +400,11 @@ Return STRICT minified JSON only:
 {"actions":[
   {"type":"LOCATION_UPDATE","rego":"","make":"","model":"","badge":"","description":"","year":"","location":""}
 ]}
+
+Hard rules:
+- Use ONLY the given lines.
+- "location" must come from the text. If no clear location is given, return {"actions":[]} instead of guessing.
+- If you cannot confidently extract at least one location update, return {"actions":[]} exactly.
 `;
 
 // ----------------------- SOLD -----------------------
@@ -429,6 +417,11 @@ Return STRICT minified JSON only:
 {"actions":[
   {"type":"SOLD","rego":"","make":"","model":"","badge":"","description":"","year":""}
 ]}
+
+Hard rules:
+- Use ONLY the given lines.
+- If a line does not clearly say a car is sold, ignore it.
+- If you cannot confidently extract at least one sold action, return {"actions":[]} exactly.
 `;
 
 // ----------------------- REPAIR -----------------------
@@ -443,6 +436,11 @@ Return STRICT minified JSON only:
 ]}
 
 - checklistItem: short imperative phrase (e.g., "Replace bonnet", "Fix oil leak").
+
+Hard rules:
+- Use ONLY information in the REPAIR lines.
+- If a line is not clearly describing a repair to a vehicle, do not create an action from it.
+- If you cannot confidently extract at least one repair, return {"actions":[]} exactly.
 `;
 
 // ----------------------- READY -----------------------
@@ -455,6 +453,11 @@ Return STRICT minified JSON only:
 {"actions":[
   {"type":"READY","rego":"","make":"","model":"","badge":"","description":"","year":"","readiness":""}
 ]}
+
+Hard rules:
+- "readiness" should reflect the text (e.g., "ready for pickup").
+- If there is no clear "ready" meaning in the line, do not guess.
+- If you cannot confidently extract at least one READY action, return {"actions":[]} exactly.
 `;
 
 // ----------------------- DROP_OFF -----------------------
@@ -470,6 +473,12 @@ Return STRICT minified JSON only:
 
 - destination: the place/person to drop off to.
 - note: include conditions and pickup intent if present (e.g., "when Mazda 3 is ready, to pick up Mazda 3 and Hummer").
+
+Hard rules:
+- Use ONLY information in the DROP_OFF lines.
+- If destination is not clearly stated, leave "destination":"" (do NOT invent).
+- If the line is not obviously a drop-off, do not create an action.
+- If you cannot confidently extract at least one DROP_OFF, return {"actions":[]} exactly.
 `;
 
 // ----------------------- CUSTOMER_APPOINTMENT -----------------------
@@ -482,18 +491,23 @@ Return STRICT minified JSON only:
 {"actions":[
   {"type":"CUSTOMER_APPOINTMENT","rego":"","make":"","model":"","badge":"","description":"","year":"","name":"","dateTime":"","notes":""}
 ]}
+
+Hard rules:
+- "name" is typically the customer or contact if explicitly stated; otherwise leave "".
+- "dateTime" must be derived directly from the text. If it is unclear, leave "".
+- Do NOT invent dates, names, or notes.
+- If you cannot confidently extract at least one customer appointment, return {"actions":[]} exactly.
 `;
 
 // ----------------------- RECON_APPOINTMENT (DB-DRIVEN; NO HARDCODED RULES) -----------------------
-// RECON_APPOINTMENT extractor (DB-driven; uses keywords + rules)
 function EXTRACT_RECON_APPOINTMENT_FROM_DB(ALLOWED_CATEGORY_LIST, CATEGORY_KEYWORDS_RULES_MAP, CATEGORY_DEFAULT_SERVICE_MAP) {
   return `
 From only RECON_APPOINTMENT lines, extract actions.
 
 Field requirements (ORDER MATTERS):
-- rego: UPPERCASE, no spaces, "" if not provided.
+- rego: UPPERCASE, no spaces, "" if not provided. Never invent a rego.
 - make: Proper Case, "" if unknown (infer from model if unambiguous).
-- model: Proper Case or common formatting (e.g., "i30", "BT-50").
+- model: Proper Case or common formatting (e.g., "i30", "BT-50"). "" if unknown.
 - badge: series/variant if present (e.g., "SR5", "XLT", "GX", "ST-L"), else "".
 - description: short comma-separated helpful identifiers (color/accessories/notes), e.g., "white, bulbar, roof racks". "" if none.
 - year: 4-digit if present, else "".
@@ -524,13 +538,12 @@ Return STRICT minified JSON only:
   {"type":"RECON_APPOINTMENT","rego":"","make":"","model":"","badge":"","description":"","year":"","name":"","service":"","category":"","dateTime":"","notes":""}
 ]}
 
-- Output 1+ actions for the same input line if multiple categories match (one action per category).
-- Strings only. Unknown → "".
-- Keep keys in EXACT order as shown above.
+Hard rules:
+- Use ONLY the provided RECON_APPOINTMENT lines and the mapping above.
+- Do NOT invent services, dates, or notes that are not clearly in the text.
+- If you cannot confidently extract at least one recon appointment, return {"actions":[]} exactly.
 `;
 }
-
-
 
 // ----------------------- NEXT_LOCATION -----------------------
 const EXTRACT_NEXT_LOCATION = `
@@ -542,6 +555,11 @@ Return STRICT minified JSON only:
 {"actions":[
   {"type":"NEXT_LOCATION","rego":"","make":"","model":"","badge":"","description":"","year":"","nextLocation":""}
 ]}
+
+Hard rules:
+- "nextLocation" must come directly from the text.
+- If there is no clear future destination intent, do not create an action.
+- If you cannot confidently extract at least one next-location action, return {"actions":[]} exactly.
 `;
 
 // ----------------------- TASK -----------------------
@@ -554,6 +572,11 @@ Return STRICT minified JSON only:
 {"actions":[
   {"type":"TASK","rego":"","make":"","model":"","badge":"","description":"","year":"","task":""}
 ]}
+
+Hard rules:
+- "task" must reflect the actual instruction in the text.
+- Do NOT invent vehicles for generic tasks that do not mention a car (leave rego/make/model as "").
+- If you cannot confidently extract at least one task, return {"actions":[]} exactly.
 `;
 
 module.exports = {

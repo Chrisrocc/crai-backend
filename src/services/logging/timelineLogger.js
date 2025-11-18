@@ -1,10 +1,10 @@
 // src/services/logging/timelineLogger.js
-// Pretty, sectioned timeline with compact single-line entries + AI AUDIT box.
+// Clean, boxed sections + compact prompt rendering + AI AUDIT.
 
 const { randomUUID } = require('crypto');
 
 const _store = new Map();
-const bar = '──────────────────────────────────';
+const BAR = '──────────────────────────────────';
 
 function newId() {
   try { return randomUUID(); } catch { return Math.random().toString(36).slice(2) + Date.now(); }
@@ -16,29 +16,29 @@ function newContext({ chatId }) {
     id,
     chatId,
 
-    // Raw inputs / steps
-    messages: [],                 // array of "Name: message"
-    photoAnalysis: [],            // strings
-    regoMatches: [],              // strings
-    carCreations: [],             // strings
+    // Top-of-log sections
+    messages: [],          // "- Name: message"
+    photoAnalysis: [],     // "- ..."
+    regoMatches: [],       // "- Car identified: Make Model REGO"
+    carCreations: [],      // "- Car Created: Make Model REGO"
 
-    // Prompts (ordered)
-    prompts: [],                  // { name, inputText, outputText }
+    // Prompt snapshots (kept compact)
+    prompts: [],           // { name, inputObj, outputObj }
 
-    // Legacy compatibility (pipeline uses these)
+    // Pipeline legacy (kept for compatibility)
     batched: [],
-    p1: [],
-    p2: [],
-    p3: [],
-    extracts: [],                 // { label, jsonString }
+    p1: [],                // filtered lines
+    p2: [],                // refined lines
+    p3: [],                // [{text, category}]
+    extracts: [],          // { label, jsonString }
     extractAll: '',
 
     // Identification + change notes
-    ident: [],
-    changes: [],
+    ident: [],             // "- ✓ Identified: ..."
+    changes: [],           // "- ..."
 
     // AI audit
-    audit: [],                    // array of one-line strings
+    audit: [],             // "- OK / FLAG ..."
   };
   _store.set(id, ctx);
   return ctx;
@@ -49,33 +49,34 @@ function get(idOrCtx) {
   return _store.get(id) || null;
 }
 
-/* -------- High-level recorders -------- */
+/* ----------------- High-level recorders ----------------- */
 function recordMessage(ctx, name, text) {
   const s = get(ctx); if (!s) return;
   s.messages.push(`- ${name}: ${text}`);
 }
-
 function recordPhoto(ctx, line) {
   const s = get(ctx); if (!s) return;
   s.photoAnalysis.push(`- ${line}`);
 }
-
 function recordRego(ctx, line) {
   const s = get(ctx); if (!s) return;
   s.regoMatches.push(`- ${line}`);
 }
-
 function recordCarCreate(ctx, line) {
   const s = get(ctx); if (!s) return;
   s.carCreations.push(`- ${line}`);
 }
 
-function recordPrompt(ctx, name, inputText, outputText) {
+/**
+ * Store prompt I/O as objects so we can render nicely (no ugly escaped JSON).
+ * name: string, inputObj: any, outputObj: any
+ */
+function recordPrompt(ctx, name, inputObj, outputObj) {
   const s = get(ctx); if (!s) return;
-  s.prompts.push({ name, inputText: String(inputText || ''), outputText: String(outputText || '') });
+  s.prompts.push({ name, inputObj, outputObj });
 }
 
-/* -------- Legacy recorders (kept so pipeline code doesn't break) -------- */
+/* ----------------- Legacy recorders ----------------- */
 function recordBatch(ctx, messages = []) {
   const s = get(ctx); if (!s) return;
   s.batched = messages.map(m => `${m.speaker || 'Unknown'}: '${m.text}'`);
@@ -103,7 +104,7 @@ function recordExtractAll(ctx, actions = []) {
   catch { s.extractAll = '{"actions":[]}'; }
 }
 
-/* -------- Identification + change notes -------- */
+/* ----------------- Identification + changes ----------------- */
 function identSuccess(ctx, { rego = '', make = '', model = '' } = {}) {
   const s = get(ctx); if (!s) return;
   const label = rego || [make, model].filter(Boolean).join(' ');
@@ -119,67 +120,152 @@ function change(ctx, text = '') {
   if (text) s.changes.push(`- ${text}`);
 }
 
-/* -------- AI Audit -------- */
+/* ----------------- AI Audit ----------------- */
 function auditLine(ctx, line) {
   const s = get(ctx); if (!s) return;
   if (line) s.audit.push(`- ${line}`);
 }
 
-/* -------- Print (pretty, compact, readable) -------- */
-function section(title, linesArray) {
-  const has = Array.isArray(linesArray) && linesArray.length > 0;
-  if (!has) return '';
-  const body = linesArray.join('\n');
-  return `\n ${title.toUpperCase()}\n${bar}\n${body}\n`;
+/* ----------------- Render helpers ----------------- */
+function section(title, lines) {
+  if (!Array.isArray(lines) || lines.length === 0) return '';
+  return `\n ${title.toUpperCase()}\n${BAR}\n${lines.join('\n')}\n`;
 }
 
+// Render compact prompt snapshots in the exact “Sender / OUTPUT” style
 function sectionPrompts(title, prompts) {
-  if (!prompts || prompts.length === 0) return '';
-  const chunks = prompts.map(p => {
-    const inp = p.inputText ? `INPUT:\n  ${p.inputText}` : 'INPUT:\n  [none]';
-    const out = p.outputText ? `OUTPUT:\n  ${p.outputText}` : 'OUTPUT:\n  [none]';
-    return ` PROMPT: ${p.name}\n${bar}\n${inp}\n${out}`;
-  });
-  return `\n ${title.toUpperCase()}\n${bar}\n${chunks.join('\n')}\n`;
+  if (!Array.isArray(prompts) || prompts.length === 0) return '';
+
+  const chunks = [];
+
+  const renderMsgs = (arr) => {
+    if (!Array.isArray(arr)) return ['  (none)'];
+    return arr.map(m => `  - ${m.speaker || 'Unknown'}: ${m.text}`);
+  };
+
+  const renderItems = (arr) => {
+    if (!Array.isArray(arr)) return ['  (none)'];
+    return arr.map(i => `  - ${i.category} — ${i.speaker || 'Unknown'}: '${i.text}'`);
+  };
+
+  const renderActions = (arr) => {
+    if (!Array.isArray(arr)) return ['  (none)'];
+    return arr.map(a => {
+      const rego = (a.rego || '').toUpperCase() || '—';
+      const car  = [a.make, a.model].filter(Boolean).join(' ') || '—';
+      switch (a.type) {
+        case 'REPAIR':              return `  - REPAIR: {rego ${rego} • ${car}, task: ${a.checklistItem || 'repair'}}`;
+        case 'RECON_APPOINTMENT':   return `  - RECON_APPOINTMENT: {rego ${rego} • ${car}, category: ${a.category || 'Uncategorized'}}`;
+        case 'LOCATION_UPDATE':     return `  - LOCATION_UPDATE: {rego ${rego}, at: ${a.location || 'unknown'}}`;
+        case 'CUSTOMER_APPOINTMENT':return `  - CUSTOMER_APPOINTMENT: {rego ${rego}, ${a.name || '—'} @ ${a.dateTime || '—'}}`;
+        case 'NEXT_LOCATION':       return `  - NEXT_LOCATION: {rego ${rego} → ${a.nextLocation || '—'}}`;
+        case 'DROP_OFF':            return `  - DROP_OFF: {rego ${rego} → ${a.destination || '—'}}`;
+        case 'TASK':                return `  - TASK: {rego ${rego}, ${a.task || '—'}}`;
+        case 'READY':               return `  - READY: {rego ${rego}}`;
+        case 'SOLD':                return `  - SOLD: {rego ${rego}}`;
+        default:                    return `  - ${a.type || 'UNKNOWN'}: {rego ${rego}}`;
+      }
+    });
+  };
+
+  for (const p of prompts) {
+    const name = String(p.name || '').trim();
+
+    // Shape-sensitive pretty print
+    let inputLines = [];
+    let outputLines = [];
+
+    // Input
+    if (name === 'FILTER_SYSTEM' || name === 'REFINE_SYSTEM') {
+      // Expect {messages:[{speaker,text}]}
+      const msgs = p?.inputObj?.messages
+        ? p.inputObj.messages
+        : // fallback: when we recorded plain text payload
+          String(p.inputObj || '')
+            .split('\n')
+            .filter(Boolean)
+            .map(t => {
+              const m = t.match(/^([^:]+):\s*'?(.*?)'?$/);
+              return { speaker: m?.[1] || 'Unknown', text: m?.[2] || t };
+            });
+      inputLines = renderMsgs(msgs);
+      const outMsgs = p?.outputObj?.messages || [];
+      outputLines = renderMsgs(outMsgs);
+    } else if (name === 'CATEGORIZE_SYSTEM') {
+      // Expect {items:[{speaker,text,category}]}
+      const msgs = String(p.inputObj || '')
+        .split('\n')
+        .filter(Boolean)
+        .map(t => {
+          const m = t.match(/^([^:]+):\s*'?(.*?)'?$/);
+          return { speaker: m?.[1] || 'Unknown', text: m?.[2] || t };
+        });
+      inputLines = renderMsgs(msgs);
+      const items = p?.outputObj?.items || [];
+      outputLines = renderItems(items);
+    } else if (String(name).startsWith('EXTRACT_')) {
+      // Expect {actions:[...]}
+      // Input could be text; show as simple one-liners
+      inputLines = String(p.inputObj || '')
+        ? String(p.inputObj).split('\n').filter(Boolean).map(t => `  - ${t}`)
+        : ['  (none)'];
+      const actions = p?.outputObj?.actions || [];
+      outputLines = renderActions(actions);
+    } else {
+      // Generic fallback
+      inputLines = String(p.inputObj || '') ? [`  ${String(p.inputObj)}`] : ['  (none)'];
+      outputLines = p.outputObj ? [`  ${JSON.stringify(p.outputObj)}`] : ['  (none)'];
+    }
+
+    chunks.push(
+      ` PROMPT: ${name}\n${BAR}\nINPUT:\n${inputLines.join('\n')}\nOUTPUT:\n${outputLines.join('\n')}`
+    );
+  }
+
+  return `\n ${title.toUpperCase()}\n${BAR}\n${chunks.join('\n')}\n`;
 }
 
 function sectionCat(title, categorized) {
-  if (!categorized || categorized.length === 0) return '';
-  const lines = categorized.map(c => `- ${c.category} — ${c.speaker || 'Unknown'}: '${c.text}'`);
-  return `\n ${title.toUpperCase()}\n${bar}\n${lines.join('\n')}\n`;
+  if (!Array.isArray(categorized) || categorized.length === 0) return '';
+  const lines = categorized.map(c => `- ${c.category} — ${c.text}`);
+  return `\n ${title.toUpperCase()}\n${BAR}\n${lines.join('\n')}\n`;
 }
 
 function sectionExtractors(title, extractsJson) {
-  if (!extractsJson || extractsJson.length === 0) return '';
-  // Render each extractor label with one line per action, compact
+  if (!Array.isArray(extractsJson) || extractsJson.length === 0) return '';
   const chunks = [];
   for (const e of extractsJson) {
     let pretty = '';
     try {
       const obj = JSON.parse(e.jsonString || '{}');
       const acts = Array.isArray(obj.actions) ? obj.actions : [];
-      const lines = acts.map(a => {
-        const rego = (a.rego || '').toUpperCase() || '—';
-        if (a.type === 'REPAIR') return `  - REPAIR: {rego ${rego} • ${[a.make, a.model].filter(Boolean).join(' ') || '—'}, task: ${a.checklistItem || 'repair'}}`;
-        if (a.type === 'RECON_APPOINTMENT') return `  - RECON_APPOINTMENT: {rego ${rego} • ${[a.make, a.model].filter(Boolean).join(' ') || '—'}, category: ${a.category || 'Uncategorized'}}`;
-        if (a.type === 'LOCATION_UPDATE') return `  - LOCATION_UPDATE: {rego ${rego}, at: ${a.location || 'unknown'}}`;
-        if (a.type === 'CUSTOMER_APPOINTMENT') return `  - CUSTOMER_APPOINTMENT: {rego ${rego}, ${a.name || '—'} @ ${a.dateTime || '—'}}`;
-        if (a.type === 'NEXT_LOCATION') return `  - NEXT_LOCATION: {rego ${rego} → ${a.nextLocation || '—'}}`;
-        if (a.type === 'DROP_OFF') return `  - DROP_OFF: {rego ${rego} → ${a.destination || '—'}}`;
-        if (a.type === 'TASK') return `  - TASK: {rego ${rego}, ${a.task || '—'}}`;
-        if (a.type === 'READY') return `  - READY: {rego ${rego}}`;
-        if (a.type === 'SOLD') return `  - SOLD: {rego ${rego}}`;
-        return `  - ${a.type || 'UNKNOWN'}: {rego ${rego}}`;
-      });
-      pretty = lines.join('\n');
+      pretty = acts.length
+        ? acts.map(a => {
+            const rego = (a.rego || '').toUpperCase() || '—';
+            const car  = [a.make, a.model].filter(Boolean).join(' ') || '—';
+            switch (a.type) {
+              case 'REPAIR':              return `  - REPAIR: {rego ${rego} • ${car}, task: ${a.checklistItem || 'repair'}}`;
+              case 'RECON_APPOINTMENT':   return `  - RECON_APPOINTMENT: {rego ${rego} • ${car}, category: ${a.category || 'Uncategorized'}}`;
+              case 'LOCATION_UPDATE':     return `  - LOCATION_UPDATE: {rego ${rego}, at: ${a.location || 'unknown'}}`;
+              case 'CUSTOMER_APPOINTMENT':return `  - CUSTOMER_APPOINTMENT: {rego ${rego}, ${a.name || '—'} @ ${a.dateTime || '—'}}`;
+              case 'NEXT_LOCATION':       return `  - NEXT_LOCATION: {rego ${rego} → ${a.nextLocation || '—'}}`;
+              case 'DROP_OFF':            return `  - DROP_OFF: {rego ${rego} → ${a.destination || '—'}}`;
+              case 'TASK':                return `  - TASK: {rego ${rego}, ${a.task || '—'}}`;
+              case 'READY':               return `  - READY: {rego ${rego}}`;
+              case 'SOLD':                return `  - SOLD: {rego ${rego}}`;
+              default:                    return `  - ${a.type || 'UNKNOWN'}: {rego ${rego}}`;
+            }
+          }).join('\n')
+        : '  - (no actions)';
     } catch {
       pretty = '  - (unparsable extractor output)';
     }
-    chunks.push(`# ${e.label.toUpperCase()}\n${pretty || '  - (no actions)'}`);
+    chunks.push(`# ${e.label.toUpperCase()}\n${pretty}`);
   }
-  return `\n ${title.toUpperCase()}\n${bar}\n${chunks.join('\n')}\n`;
+  return `\n ${title.toUpperCase()}\n${BAR}\n${chunks.join('\n')}\n`;
 }
 
+/* ----------------- Final print ----------------- */
 function print(ctx) {
   const s = get(ctx); if (!s) return;
 
@@ -191,7 +277,7 @@ function print(ctx) {
     sectionPrompts('Prompts', s.prompts) +
     sectionCat('Categorized', s.p3) +
     sectionExtractors('Extractors', s.extracts) +
-    (s.extractAll ? `\n FINAL OUTPUT & ACTIONS\n${bar}\n  ${s.extractAll}\n` : '') +
+    (s.extractAll ? `\n FINAL OUTPUT & ACTIONS\n${BAR}\n  ${s.extractAll}\n` : '') +
     section('Identification', s.ident) +
     section('Changes', s.changes) +
     section('AI Audit', s.audit) +
@@ -207,8 +293,8 @@ module.exports = {
 
   // high-level
   recordMessage,
-  recordPhoto: recordPhoto,
-  recordRego: recordRego,
+  recordPhoto,
+  recordRego,
   recordCarCreate,
   recordPrompt,
 

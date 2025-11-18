@@ -1,4 +1,4 @@
-// src/services/logging/timelineLogger.js
+// backend/src/services/logging/timelineLogger.js
 const { randomUUID } = require('crypto');
 
 const _store = new Map();
@@ -18,6 +18,8 @@ function newContext({ chatId }) {
     extractAll: '',
     ident: [],
     changes: [],
+    qa: null,        // full report
+    qaItems: []      // flat items
   };
   _store.set(id, ctx);
   return ctx;
@@ -70,6 +72,16 @@ function change(ctx, text = '') {
   if (text) s.changes.push(text);
 }
 
+// ---------- QA logging ----------
+function recordQA(ctx, report) {
+  const s = get(ctx); if (!s) return;
+  s.qa = report || null;
+}
+function recordQAItem(ctx, item) {
+  const s = get(ctx); if (!s) return;
+  s.qaItems.push(item);
+}
+
 function print(ctx) {
   const s = get(ctx); if (!s) return;
   const section = (title, body) => body ? `\n${title}\n${'-'.repeat(title.length)}\n${body}\n` : '';
@@ -83,6 +95,19 @@ function print(ctx) {
   const idBody = s.ident.join('\n');
   const changesBody = s.changes.join('\n');
 
+  let qaBody = '';
+  if (s.qa) {
+    const sum = `Summary: total=${s.qa.summary.total}, ok=${s.qa.summary.ok}, flagged=${s.qa.summary.flagged}`;
+    const lines = (s.qa.items || []).map((it, idx) => {
+      const head = `[${idx}] ${it.status} • ${it.action?.type || ''} • ${it.action?.rego || ''}`;
+      const src = it.sourceText ? `SRC: ${it.sourceText}` : '';
+      const flg = (it.flags || []).length ? `FLAGS: ${it.flags.join(', ')}` : '';
+      const sug = (it.suggestions || []).length ? `SUGGEST: ${it.suggestions.join(' | ')}` : '';
+      return [head, src, flg, sug].filter(Boolean).join('\n');
+    }).join('\n\n');
+    qaBody = [sum, lines].filter(Boolean).join('\n\n');
+  }
+
   console.log(
     section('Batch', bodyBatch) +
     section('Prompt 1 (Filtered)', bodyP1) +
@@ -92,6 +117,7 @@ function print(ctx) {
     section('Actions (Combined)', allJson) +
     section('Identification', idBody) +
     section('Changes', changesBody) +
+    section('QA Check', qaBody) +
     '\n' + '='.repeat(40) + '\n'
   );
 
@@ -109,5 +135,8 @@ module.exports = {
   identSuccess,
   identFail,
   change,
+  // QA
+  recordQA,
+  recordQAItem,
   print,
 };

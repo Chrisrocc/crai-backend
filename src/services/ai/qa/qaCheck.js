@@ -5,7 +5,7 @@
 // short, human-readable justifications per action.
 //
 // Usage:
-//   const audit = await runAudit({ batch, refined, actions });
+//   const audit = await runAudit({ batch, refined, categorized, actions });
 //   timeline.recordAudit(tctx, audit); // pretty printing handled by timeline logger
 
 const { z } = require("zod");
@@ -19,7 +19,7 @@ const AuditItem = z.object({
   reason: z.string().default(""),
   // the minimal snippet from source that justifies the verdict
   evidenceText: z.string().default(""),
-  // which source line the snippet came from (index into provided messages, 1-based)
+  // which source line the snippet came from (index into provided messages)
   evidenceSourceIndex: z.number().int().nonnegative().optional(),
 });
 
@@ -43,19 +43,26 @@ function fmtMsgs(msgs) {
 
 function fmtActions(actions) {
   return (Array.isArray(actions) ? actions : [])
-    .map(
-      (a, i) =>
-        `${i + 1}. ${a.type}` +
-        ` | rego:${a.rego || ""}` +
-        (a.make || a.model ? ` | ${[a.make, a.model].filter(Boolean).join(" ")}` : "") +
-        (a.checklistItem ? ` | checklistItem:${a.checklistItem}` : "") +
-        (a.readiness ? ` | readiness:${a.readiness}` : "") +
-        (a.destination ? ` | destination:${a.destination}` : "") +
-        (a.nextLocation ? ` | nextLocation:${a.nextLocation}` : "") +
-        (a.category ? ` | category:${a.category}` : "") +
-        (a.dateTime ? ` | dateTime:${a.dateTime}` : "") +
-        (a.task ? ` | task:${a.task}` : "")
-    )
+    .map((a, i) => {
+      const parts = [];
+      parts.push(`${i + 1}. ${a.type}`);
+      parts.push(`rego:${a.rego || ""}`);
+      if (a.make || a.model) {
+        parts.push(
+          [a.make, a.model]
+            .filter(Boolean)
+            .join(" ")
+        );
+      }
+      if (a.checklistItem) parts.push(`checklistItem:${a.checklistItem}`);
+      if (a.readiness) parts.push(`readiness:${a.readiness}`);
+      if (a.destination) parts.push(`destination:${a.destination}`);
+      if (a.nextLocation) parts.push(`nextLocation:${a.nextLocation}`);
+      if (a.category) parts.push(`category:${a.category}`);
+      if (a.dateTime) parts.push(`dateTime:${a.dateTime}`);
+      if (a.task) parts.push(`task:${a.task}`);
+      return parts.join(" | ");
+    })
     .join("\n");
 }
 
@@ -67,19 +74,40 @@ Your job: for EACH action, decide if it is supported by the messages and show a 
 Return STRICT minified JSON only with this schema:
 {"summary":{"total":0,"correct":0,"partial":0,"incorrect":0,"unsure":0},"items":[{"actionIndex":0,"verdict":"CORRECT","reason":"","evidenceText":"","evidenceSourceIndex":0}]}
 
-Guidelines:
-- CORRECT: The message clearly supports this action (matching car and detail). Quote the smallest helpful snippet as evidenceText.
-- PARTIAL: The car is correct, but some important detail (time/place/service/task) is missing or ambiguous. Show the closest snippet.
-- INCORRECT: The message contradicts the action (wrong car/detail) or the action invents info not present in any message.
-- UNSURE: The message hints at the action but is too vague to be confident.
+Interpretation rules:
+- You MUST treat the original messages as the only source of truth.
+- Do NOT reward hallucinations. If the action describes anything that is not clearly present in the messages, it is INCORRECT.
+- If you are unsure, choose UNSURE instead of guessing CORRECT.
 
-Requirements:
-- Keep reason extremely short (one simple sentence).
-- evidenceText must be a minimal direct quote from the message (not your paraphrase).
-- For evidenceSourceIndex, use the 1-based index of the message line you quoted; omit the field if no single line fits.
-- Always include one AuditItem per actionIndex from 0..(actions.length-1); do not skip any.
+Verdict guidelines:
+- CORRECT:
+  - The message clearly supports this action (matching car and detail).
+  - For RECON_APPOINTMENT: the text explicitly implies an appointment or someone coming / booking / taking the car for that service.
+    Examples of valid appointment signals:
+    - "Jan is coming to fix the Civic airbag light."
+    - "Booked with Imad."
+    - "Taking it to Al's for wheels."
+- PARTIAL:
+  - The car is correct, but some important detail (time/place/service/task) is missing or ambiguous compared to the action.
+  - Or the action slightly over-interprets, but still mostly matches the text.
+- INCORRECT:
+  - The message contradicts the action (wrong car/detail), OR
+  - The action invents info not present in any message (e.g., adding a category, appointment, or destination that the text never mentions).
+  - For RECON_APPOINTMENT: if the message only describes damage/repairs (e.g., "needs new bonnet and bumper") but does NOT mention any appointment, booking, or person coming, then RECON_APPOINTMENT is INCORRECT.
+- UNSURE:
+  - The message hints at the action but is too vague to be confident.
+  - Use UNSURE rather than CORRECT if you cannot quote a clear snippet.
 
-IMPORTANT: Do not modify actions — this is a READ-ONLY audit.
+Evidence rules:
+- Keep "reason" very short (one sentence).
+- "evidenceText" MUST be a minimal direct quote from the message (not your paraphrase).
+- For "evidenceSourceIndex", use the 1-based index of the message line you quoted; omit the field if no single line fits.
+- If you mark a verdict as CORRECT or PARTIAL, you SHOULD provide evidenceText from the messages that supports it.
+- If you mark a verdict as INCORRECT because there is no support, you may leave evidenceText empty.
+
+IMPORTANT:
+- Do not modify actions — this is a READ-ONLY audit.
+- Do not invent new messages or extra context.
 `;
 
 // ---------- Public API ----------
@@ -89,7 +117,10 @@ async function runAudit({ batch = [], refined = [], actions = [] }) {
   const sourceMessages = [
     ...(Array.isArray(batch) ? batch : []),
     ...(Array.isArray(refined) ? refined : []),
-  ].map((m) => ({ speaker: m.speaker || "Unknown", text: m.text || "" }));
+  ].map((m) => ({
+    speaker: m.speaker || "Unknown",
+    text: m.text || "",
+  }));
 
   const user = [
     "MESSAGES (1-based):",

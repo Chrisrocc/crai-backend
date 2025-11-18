@@ -1,69 +1,45 @@
 // src/services/logging/timelineLogger.js
 const { randomUUID } = require('crypto');
 
-/**
- * Timeline logger that prints big, readable JSON blocks.
- * - We store RAW objects and render with JSON.stringify(..., null, 2)
- * - Sections are boxed and consistently ordered
- * - No collapsed single-line JSON, ever
- */
-
 const _store = new Map();
 
-// ---------------------------
-// Config
-// ---------------------------
-const MAX_LINE = 320; // long single lines will be trimmed for sanity
+// ---------- config ----------
+const MAX_LINE = 320;
 const TRIM_NOTE = ' …(trimmed)';
 
-// ---------------------------
-// Helpers
-// ---------------------------
+// ---------- helpers ----------
 const idOf = (x) => (typeof x === 'string' ? x : x?.id);
-const safe = (v, fallback) => (v === undefined || v === null ? fallback : v);
+const safe = (v, fb) => (v === undefined || v === null ? fb : v);
 
-function box(title) {
+const box = (title) => {
   const line = '═'.repeat(Math.max(36, title.length + 2));
   return `\n${line}\n ${title}\n${line}\n`;
-}
-
-function sub(label) {
-  return `\n— ${label} —\n`;
-}
+};
+const sub = (label) => `\n— ${label} —\n`;
 
 function prettyJSON(obj) {
   try {
-    // If a string that looks like JSON was passed, parse then pretty
-    if (typeof obj === 'string') {
-      const parsed = JSON.parse(obj);
-      return JSON.stringify(parsed, null, 2);
-    }
-    return JSON.stringify(obj, null, 2);
+    if (typeof obj === 'string') return JSON.stringify(JSON.parse(obj), null, 2);
+    return JSON.stringify(obj ?? {}, null, 2);
   } catch {
-    // Fallback to raw string
     return String(obj ?? '');
   }
 }
-
-function trimLongLines(str) {
-  return String(str)
+const trimLongLines = (s) =>
+  String(s)
     .split('\n')
-    .map((line) =>
-      line.length > MAX_LINE ? line.slice(0, MAX_LINE) + TRIM_NOTE : line
-    )
+    .map((l) => (l.length > MAX_LINE ? l.slice(0, MAX_LINE) + TRIM_NOTE : l))
     .join('\n');
-}
 
-// Render a {messages:[{speaker,text}]} object from an array of Msgs
 function renderMessagesArray(msgs = []) {
-  const obj = { messages: (Array.isArray(msgs) ? msgs : []).map((m) => ({
-    speaker: String(m?.speaker || ''),
-    text: String(m?.text || ''),
-  })) };
+  const obj = {
+    messages: (Array.isArray(msgs) ? msgs : []).map((m) => ({
+      speaker: String(m?.speaker || ''),
+      text: String(m?.text || ''),
+    })),
+  };
   return prettyJSON(obj);
 }
-
-// Render categorized lines as JSON
 function renderCategorized(items = []) {
   const obj = {
     items: (Array.isArray(items) ? items : []).map((i) => ({
@@ -74,8 +50,6 @@ function renderCategorized(items = []) {
   };
   return prettyJSON(obj);
 }
-
-// Render extractor raw outputs (already JSON from the LLM)
 function renderExtracts(arr = []) {
   const blocks = [];
   for (const e of arr || []) {
@@ -86,14 +60,11 @@ function renderExtracts(arr = []) {
   }
   return blocks.join('');
 }
-
 function renderActions(actions = []) {
   return prettyJSON({ actions: Array.isArray(actions) ? actions : [] });
 }
 
-// ---------------------------
-// Public API
-// ---------------------------
+// ---------- state / API ----------
 function newContext({ chatId }) {
   const id =
     typeof randomUUID === 'function'
@@ -105,143 +76,118 @@ function newContext({ chatId }) {
     chatId,
 
     // Inputs
-    batched: [], // [{speaker,text}]
-    photoAnalysis: [], // optional strings
-    regoIdent: { success: [], fail: [] }, // arrays of strings
-    carCreated: [], // strings like "Make Model REGO"
+    batched: [],
+    photoAnalysis: [],
+    regoIdent: { success: [], fail: [] },
+    carCreated: [],
 
     // Prompts
-    p1: [], // filtered messages [{speaker,text}]
-    p2: [], // refined messages  [{speaker,text}]
-    p3: [], // categorized [{speaker,text,category}]
-    extracts: [], // [{label, raw}]
-    actions: [], // final combined actions []
+    // legacy direct buckets:
+    p1: [],
+    p2: [],
+    p3: [],
+    // generic prompts recorded via recordPrompt():
+    prompts: [], // [{name,input,output}]
+
+    extracts: [],    // [{label, raw}]
+    actions: [],     // final actions
 
     // QA / meta
-    identNotes: [], // ✓ / ✗ messages
-    changes: [], // bullet messages
+    identNotes: [],
+    changes: [],
   };
 
   _store.set(id, ctx);
   return ctx;
 }
+const get = (idOrCtx) => _store.get(idOf(idOrCtx)) || null;
 
-function get(idOrCtx) {
-  return _store.get(idOf(idOrCtx)) || null;
-}
-
-// ------------ recorders ------------
+// ---------- recorders ----------
 function recordBatch(ctx, messages = []) {
-  const s = get(ctx);
-  if (!s) return;
+  const s = get(ctx); if (!s) return;
   s.batched = Array.isArray(messages) ? messages : [];
 }
-
 function recordPhoto(ctx, lines = []) {
-  const s = get(ctx);
-  if (!s) return;
+  const s = get(ctx); if (!s) return;
   s.photoAnalysis.push(...(Array.isArray(lines) ? lines : [String(lines)]));
 }
-
 function recordRegoSuccess(ctx, label) {
-  const s = get(ctx);
-  if (!s) return;
+  const s = get(ctx); if (!s) return;
   s.regoIdent.success.push(String(label || ''));
 }
-
 function recordRegoFail(ctx, label) {
-  const s = get(ctx);
-  if (!s) return;
+  const s = get(ctx); if (!s) return;
   s.regoIdent.fail.push(String(label || ''));
 }
-
 function recordCarCreated(ctx, label) {
-  const s = get(ctx);
-  if (!s) return;
+  const s = get(ctx); if (!s) return;
   s.carCreated.push(String(label || ''));
 }
 
-function recordP1(ctx, messages = []) {
-  const s = get(ctx);
-  if (!s) return;
-  s.p1 = Array.isArray(messages) ? messages : [];
-}
+// legacy named buckets
+function recordP1(ctx, messages = []) { const s = get(ctx); if (s) s.p1 = Array.isArray(messages) ? messages : []; }
+function recordP2(ctx, messages = []) { const s = get(ctx); if (s) s.p2 = Array.isArray(messages) ? messages : []; }
+function recordP3(ctx, items = [])    { const s = get(ctx); if (s) s.p3 = Array.isArray(items) ? items : []; }
 
-function recordP2(ctx, messages = []) {
-  const s = get(ctx);
-  if (!s) return;
-  s.p2 = Array.isArray(messages) ? messages : [];
-}
-
-function recordP3(ctx, items = []) {
-  const s = get(ctx);
-  if (!s) return;
-  s.p3 = Array.isArray(items) ? items : [];
+// NEW: generic prompt recorder (compat shim for pipeline calls)
+function recordPrompt(ctx, name, input, output) {
+  const s = get(ctx); if (!s) return;
+  s.prompts.push({
+    name: String(name || 'PROMPT'),
+    input,
+    output,
+  });
 }
 
 function recordExtract(ctx, label, rawObj) {
-  const s = get(ctx);
-  if (!s) return;
+  const s = get(ctx); if (!s) return;
   s.extracts.push({ label: String(label || ''), raw: rawObj });
 }
-
 function recordExtractAll(ctx, actions = []) {
-  const s = get(ctx);
-  if (!s) return;
+  const s = get(ctx); if (!s) return;
   s.actions = Array.isArray(actions) ? actions : [];
 }
 
 function identSuccess(ctx, { rego = '', make = '', model = '' } = {}) {
-  const s = get(ctx);
-  if (!s) return;
+  const s = get(ctx); if (!s) return;
   const label = rego || [make, model].filter(Boolean).join(' ');
   s.identNotes.push(`✓ Identified: ${label || '(unknown)'}`);
 }
-
 function identFail(ctx, { reason = '', rego = '', make = '', model = '' } = {}) {
-  const s = get(ctx);
-  if (!s) return;
+  const s = get(ctx); if (!s) return;
   const input = rego || [make, model].filter(Boolean).join(' ');
   s.identNotes.push(`✗ Not identified${input ? ` (${input})` : ''}${reason ? `: ${reason}` : ''}`);
 }
-
 function change(ctx, text = '') {
-  const s = get(ctx);
-  if (!s) return;
+  const s = get(ctx); if (!s) return;
   if (text) s.changes.push(text);
 }
 
-// ------------ printer ------------
+// ---------- printer ----------
 function print(ctx) {
-  const s = get(ctx);
-  if (!s) return;
-
+  const s = get(ctx); if (!s) return;
   let out = '';
 
   // Messages
   out += box('MESSAGES');
   out += trimLongLines(renderMessagesArray(s.batched));
 
-  // Photo analysis (optional)
+  // Photo analysis
   if (s.photoAnalysis.length) {
     out += box('PHOTO ANALYSIS');
-    out += trimLongLines(
-      s.photoAnalysis.map((l) => `• ${l}`).join('\n')
-    );
+    out += trimLongLines(s.photoAnalysis.map((l) => `• ${l}`).join('\n'));
   }
 
-  // Rego checker/matcher
+  // Rego checker
   out += box('REGO CHECKER / MATCHER');
   if (!s.regoIdent.success.length && !s.regoIdent.fail.length) {
     out += '(no rego results)\n';
   } else {
     if (s.regoIdent.success.length) {
-      out += sub('Car identified');
-      out += s.regoIdent.success.map((x) => `• ${x}`).join('\n') + '\n';
+      out += sub('Car identified') + s.regoIdent.success.map((x) => `• ${x}`).join('\n') + '\n';
     }
     if (s.regoIdent.fail.length) {
-      out += sub('Not identified');
-      out += s.regoIdent.fail.map((x) => `• ${x}`).join('\n') + '\n';
+      out += sub('Not identified') + s.regoIdent.fail.map((x) => `• ${x}`).join('\n') + '\n';
     }
   }
 
@@ -251,11 +197,7 @@ function print(ctx) {
     out += s.carCreated.map((x) => `• ${x}`).join('\n') + '\n';
   }
 
-  // Prompts (INPUT/OUTPUT)
-  out += box('PROMPT: PHOTO_MERGER_SYSTEM');
-  out += sub('INPUT') + '(handled earlier in pipeline)\n';
-  out += sub('OUTPUT') + '(attach here if photo merger is invoked in this module)\n';
-
+  // Legacy named prompts
   out += box('PROMPT: FILTER_SYSTEM');
   out += sub('INPUT') + trimLongLines(renderMessagesArray(s.batched)) + '\n';
   out += sub('OUTPUT') + trimLongLines(renderMessagesArray(s.p1)) + '\n';
@@ -268,7 +210,16 @@ function print(ctx) {
   out += sub('INPUT') + trimLongLines(renderMessagesArray(s.p2)) + '\n';
   out += sub('OUTPUT') + trimLongLines(renderCategorized(s.p3)) + '\n';
 
-  // Extractors
+  // Any extra prompts recorded via recordPrompt()
+  if (s.prompts.length) {
+    for (const p of s.prompts) {
+      out += box(`PROMPT: ${p.name}`);
+      if (p.input !== undefined)  out += sub('INPUT')  + trimLongLines(prettyJSON(p.input))  + '\n';
+      if (p.output !== undefined) out += sub('OUTPUT') + trimLongLines(prettyJSON(p.output)) + '\n';
+    }
+  }
+
+  // Extractors raw
   if (s.extracts.length) {
     out += box('EXTRACTORS — RAW OUTPUTS');
     out += renderExtracts(s.extracts);
@@ -289,14 +240,11 @@ function print(ctx) {
   }
 
   out += '\n' + '─'.repeat(42) + '\n';
-
   console.log(out);
   _store.delete(s.id);
 }
 
-// ---------------------------
-// Exports
-// ---------------------------
+// ---------- exports ----------
 module.exports = {
   newContext,
   get,
@@ -307,9 +255,12 @@ module.exports = {
   recordRegoSuccess,
   recordRegoFail,
   recordCarCreated,
+
   recordP1,
   recordP2,
   recordP3,
+  recordPrompt,        // ← NEW
+
   recordExtract,
   recordExtractAll,
 
@@ -317,6 +268,5 @@ module.exports = {
   identFail,
   change,
 
-  // printer
   print,
 };

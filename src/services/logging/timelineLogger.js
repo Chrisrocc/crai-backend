@@ -1,309 +1,322 @@
 // src/services/logging/timelineLogger.js
 const { randomUUID } = require('crypto');
 
+/**
+ * Timeline logger that prints big, readable JSON blocks.
+ * - We store RAW objects and render with JSON.stringify(..., null, 2)
+ * - Sections are boxed and consistently ordered
+ * - No collapsed single-line JSON, ever
+ */
+
 const _store = new Map();
 
-// Optional TTY colors (auto-off if not a terminal)
-const isTTY = !!(process.stdout && process.stdout.isTTY);
-const C = isTTY ? {
-  bold: s => `\x1b[1m${s}\x1b[0m`,
-  dim: s => `\x1b[2m${s}\x1b[0m`,
-} : { bold: s => s, dim: s => s };
+// ---------------------------
+// Config
+// ---------------------------
+const MAX_LINE = 320; // long single lines will be trimmed for sanity
+const TRIM_NOTE = ' …(trimmed)';
 
-const HR = "_".repeat(38);
-const HR_LONG = "_".repeat(70);
+// ---------------------------
+// Helpers
+// ---------------------------
+const idOf = (x) => (typeof x === 'string' ? x : x?.id);
+const safe = (v, fallback) => (v === undefined || v === null ? fallback : v);
 
-function idOf() {
-  return typeof randomUUID === 'function'
-    ? randomUUID()
-    : Math.random().toString(36).slice(2) + Date.now();
+function box(title) {
+  const line = '═'.repeat(Math.max(36, title.length + 2));
+  return `\n${line}\n ${title}\n${line}\n`;
 }
 
-function safeStr(x) {
-  if (x == null) return "";
-  try { return String(x); } catch { return ""; }
-}
-function oneLine(s, max = 200) {
-  s = safeStr(s).replace(/\s+/g, " ").trim();
-  return s.length > max ? (s.slice(0, max - 1) + "…") : s;
-}
-function sect(title) {
-  return `\n${HR}\n${title}\n\n`;
+function sub(label) {
+  return `\n— ${label} —\n`;
 }
 
+function prettyJSON(obj) {
+  try {
+    // If a string that looks like JSON was passed, parse then pretty
+    if (typeof obj === 'string') {
+      const parsed = JSON.parse(obj);
+      return JSON.stringify(parsed, null, 2);
+    }
+    return JSON.stringify(obj, null, 2);
+  } catch {
+    // Fallback to raw string
+    return String(obj ?? '');
+  }
+}
+
+function trimLongLines(str) {
+  return String(str)
+    .split('\n')
+    .map((line) =>
+      line.length > MAX_LINE ? line.slice(0, MAX_LINE) + TRIM_NOTE : line
+    )
+    .join('\n');
+}
+
+// Render a {messages:[{speaker,text}]} object from an array of Msgs
+function renderMessagesArray(msgs = []) {
+  const obj = { messages: (Array.isArray(msgs) ? msgs : []).map((m) => ({
+    speaker: String(m?.speaker || ''),
+    text: String(m?.text || ''),
+  })) };
+  return prettyJSON(obj);
+}
+
+// Render categorized lines as JSON
+function renderCategorized(items = []) {
+  const obj = {
+    items: (Array.isArray(items) ? items : []).map((i) => ({
+      speaker: String(i?.speaker || ''),
+      text: String(i?.text || ''),
+      category: String(i?.category || 'OTHER'),
+    })),
+  };
+  return prettyJSON(obj);
+}
+
+// Render extractor raw outputs (already JSON from the LLM)
+function renderExtracts(arr = []) {
+  const blocks = [];
+  for (const e of arr || []) {
+    blocks.push(
+      sub(`# ${String(e?.label || '').toUpperCase()}`) +
+        trimLongLines(prettyJSON(safe(e?.raw, {})))
+    );
+  }
+  return blocks.join('');
+}
+
+function renderActions(actions = []) {
+  return prettyJSON({ actions: Array.isArray(actions) ? actions : [] });
+}
+
+// ---------------------------
+// Public API
+// ---------------------------
 function newContext({ chatId }) {
-  const id = idOf();
+  const id =
+    typeof randomUUID === 'function'
+      ? randomUUID()
+      : Math.random().toString(36).slice(2) + Date.now();
+
   const ctx = {
     id,
     chatId,
 
-    // Sections
-    messages: [],            // [{speaker,text}]
-    photoAnalysis: [],       // [string]
-    regoChecks: [],          // [{ok, make, model, rego, notes}]
-    carCreates: [],          // [{make, model, rego, id?}]
+    // Inputs
+    batched: [], // [{speaker,text}]
+    photoAnalysis: [], // optional strings
+    regoIdent: { success: [], fail: [] }, // arrays of strings
+    carCreated: [], // strings like "Make Model REGO"
 
-    // Prompts (arbitrary)
-    prompts: [],             // [{name, inputText, outputText}]
+    // Prompts
+    p1: [], // filtered messages [{speaker,text}]
+    p2: [], // refined messages  [{speaker,text}]
+    p3: [], // categorized [{speaker,text,category}]
+    extracts: [], // [{label, raw}]
+    actions: [], // final combined actions []
 
-    // Legacy P1/P2/P3 capture for compatibility (also mirrored into prompts)
-    p1: [],                  // [{speaker,text}]
-    p2: [],                  // [{speaker,text}]
-    p3: [],                  // [{speaker,text,category}]
-
-    // Extractors
-    extracts: [],            // [{label, jsonString}]
-    extractAll: '',          // stringified {"actions":[...]}
-
-    // QA audit payloads (normalized into a clean print)
-    qa: null,                // {items:[...], summary:{...}} or raw obj
-
-    // Identities / changes
-    ident: [],               // ["✓ Identified: XYZ", ...]
-    changes: [],             // ["Merged X into Y", ...]
+    // QA / meta
+    identNotes: [], // ✓ / ✗ messages
+    changes: [], // bullet messages
   };
+
   _store.set(id, ctx);
   return ctx;
 }
 
 function get(idOrCtx) {
-  const id = typeof idOrCtx === 'string' ? idOrCtx : idOrCtx?.id;
-  return _store.get(id) || null;
+  return _store.get(idOf(idOrCtx)) || null;
 }
 
-/* ---------------------------
- * SECTION RECORDERS
- * ------------------------- */
-// Messages
+// ------------ recorders ------------
 function recordBatch(ctx, messages = []) {
-  const s = get(ctx); if (!s) return;
-  s.messages = (Array.isArray(messages) ? messages : [])
-    .map(m => ({ speaker: m.speaker || 'Unknown', text: safeStr(m.text) }));
+  const s = get(ctx);
+  if (!s) return;
+  s.batched = Array.isArray(messages) ? messages : [];
 }
 
-// Photo analysis
-function recordPhotoAnalysis(ctx, lines = []) {
-  const s = get(ctx); if (!s) return;
-  const arr = Array.isArray(lines) ? lines : [lines];
-  s.photoAnalysis.push(...arr.map(oneLine));
+function recordPhoto(ctx, lines = []) {
+  const s = get(ctx);
+  if (!s) return;
+  s.photoAnalysis.push(...(Array.isArray(lines) ? lines : [String(lines)]));
 }
 
-// Rego checker / matcher
-function recordRegoMatch(ctx, { ok = false, make = '', model = '', rego = '', notes = '' } = {}) {
-  const s = get(ctx); if (!s) return;
-  s.regoChecks.push({ ok: !!ok, make: safeStr(make), model: safeStr(model), rego: safeStr(rego).toUpperCase(), notes: oneLine(notes) });
+function recordRegoSuccess(ctx, label) {
+  const s = get(ctx);
+  if (!s) return;
+  s.regoIdent.success.push(String(label || ''));
 }
 
-// Car creator
-function recordCarCreate(ctx, { make = '', model = '', rego = '', id = '' } = {}) {
-  const s = get(ctx); if (!s) return;
-  s.carCreates.push({ make: safeStr(make), model: safeStr(model), rego: safeStr(rego).toUpperCase(), id: safeStr(id) });
+function recordRegoFail(ctx, label) {
+  const s = get(ctx);
+  if (!s) return;
+  s.regoIdent.fail.push(String(label || ''));
 }
 
-// Generic prompt recorder
-function recordPrompt(ctx, name, { inputText = '', outputText = '' } = {}) {
-  const s = get(ctx); if (!s) return;
-  s.prompts.push({
-    name: safeStr(name),
-    inputText: oneLine(inputText, 2000),    // keep long but single-line
-    outputText: oneLine(outputText, 2000),
-  });
+function recordCarCreated(ctx, label) {
+  const s = get(ctx);
+  if (!s) return;
+  s.carCreated.push(String(label || ''));
 }
 
-/* -------- Back-compat: P1/P2/P3 – also mirrored into prompts -------- */
-function _fmtMsgs(messages = []) {
-  return (messages || []).map(m => `${m.speaker || 'Unknown'}: '${safeStr(m.text)}'`).join('\n');
-}
 function recordP1(ctx, messages = []) {
-  const s = get(ctx); if (!s) return;
-  s.p1 = (messages || []).map(m => ({ speaker: m.speaker || 'Unknown', text: safeStr(m.text) }));
-  recordPrompt(ctx, 'FILTER_SYSTEM', { inputText: '', outputText: JSON.stringify({ messages: s.p1 }) });
+  const s = get(ctx);
+  if (!s) return;
+  s.p1 = Array.isArray(messages) ? messages : [];
 }
+
 function recordP2(ctx, messages = []) {
-  const s = get(ctx); if (!s) return;
-  s.p2 = (messages || []).map(m => ({ speaker: m.speaker || 'Unknown', text: safeStr(m.text) }));
-  recordPrompt(ctx, 'REFINE_SYSTEM', { inputText: '', outputText: JSON.stringify({ messages: s.p2 }) });
+  const s = get(ctx);
+  if (!s) return;
+  s.p2 = Array.isArray(messages) ? messages : [];
 }
+
 function recordP3(ctx, items = []) {
-  const s = get(ctx); if (!s) return;
-  s.p3 = (items || []).map(i => ({
-    speaker: i.speaker || 'Unknown',
-    text: safeStr(i.text),
-    category: safeStr(i.category),
-  }));
-  recordPrompt(ctx, 'CATEGORIZE_SYSTEM', { inputText: '', outputText: JSON.stringify({ items: s.p3 }) });
+  const s = get(ctx);
+  if (!s) return;
+  s.p3 = Array.isArray(items) ? items : [];
 }
 
-/* -------- Extractors & combined -------- */
 function recordExtract(ctx, label, rawObj) {
-  const s = get(ctx); if (!s) return;
-  try { s.extracts.push({ label: safeStr(label), jsonString: JSON.stringify(rawObj) }); }
-  catch { s.extracts.push({ label: safeStr(label), jsonString: '{"actions":[]}' }); }
+  const s = get(ctx);
+  if (!s) return;
+  s.extracts.push({ label: String(label || ''), raw: rawObj });
 }
+
 function recordExtractAll(ctx, actions = []) {
-  const s = get(ctx); if (!s) return;
-  try { s.extractAll = JSON.stringify({ actions }); }
-  catch { s.extractAll = '{"actions":[]}'; }
+  const s = get(ctx);
+  if (!s) return;
+  s.actions = Array.isArray(actions) ? actions : [];
 }
 
-/* -------- QA / Audit -------- */
-function recordQAAudit(ctx, qaPayload) {
-  const s = get(ctx); if (!s) return;
-  // store raw; print() will render nicely
-  s.qa = qaPayload || null;
-}
-
-/* -------- Identity / changes helpers (unchanged) -------- */
 function identSuccess(ctx, { rego = '', make = '', model = '' } = {}) {
-  const s = get(ctx); if (!s) return;
+  const s = get(ctx);
+  if (!s) return;
   const label = rego || [make, model].filter(Boolean).join(' ');
-  s.ident.push(`✓ Identified: ${label || '(unknown)'}`);
+  s.identNotes.push(`✓ Identified: ${label || '(unknown)'}`);
 }
+
 function identFail(ctx, { reason = '', rego = '', make = '', model = '' } = {}) {
-  const s = get(ctx); if (!s) return;
+  const s = get(ctx);
+  if (!s) return;
   const input = rego || [make, model].filter(Boolean).join(' ');
-  s.ident.push(`✗ Not identified${input ? ` (${input})` : ''}: ${reason}`);
+  s.identNotes.push(`✗ Not identified${input ? ` (${input})` : ''}${reason ? `: ${reason}` : ''}`);
 }
+
 function change(ctx, text = '') {
-  const s = get(ctx); if (!s) return;
+  const s = get(ctx);
+  if (!s) return;
   if (text) s.changes.push(text);
 }
 
-/* ---------------------------
- * PRINT (exact structure requested)
- * ------------------------- */
+// ------------ printer ------------
 function print(ctx) {
-  const s = get(ctx); if (!s) return;
+  const s = get(ctx);
+  if (!s) return;
 
-  let out = "";
+  let out = '';
 
-  // 1) Messages
-  if (s.messages.length) {
-    out += sect('Messages');
-    for (const m of s.messages) {
-      out += `${m.speaker}: ${m.text}\n`;
-    }
-  }
+  // Messages
+  out += box('MESSAGES');
+  out += trimLongLines(renderMessagesArray(s.batched));
 
-  // 2) Photo Analysis
+  // Photo analysis (optional)
   if (s.photoAnalysis.length) {
-    out += sect('Photo Analysis');
-    for (const line of s.photoAnalysis) out += line + "\n";
+    out += box('PHOTO ANALYSIS');
+    out += trimLongLines(
+      s.photoAnalysis.map((l) => `• ${l}`).join('\n')
+    );
   }
 
-  // 3) Rego Checker/Matcher
-  if (s.regoChecks.length) {
-    out += sect('Rego Checker/Matcher');
-    for (const r of s.regoChecks) {
-      const status = r.ok ? "Car identified" : "Not identified";
-      const detail = [r.make, r.model, r.rego].filter(Boolean).join(", ");
-      out += `${status}: ${detail || "-"}${r.notes ? ` (${r.notes})` : ""}\n`;
+  // Rego checker/matcher
+  out += box('REGO CHECKER / MATCHER');
+  if (!s.regoIdent.success.length && !s.regoIdent.fail.length) {
+    out += '(no rego results)\n';
+  } else {
+    if (s.regoIdent.success.length) {
+      out += sub('Car identified');
+      out += s.regoIdent.success.map((x) => `• ${x}`).join('\n') + '\n';
+    }
+    if (s.regoIdent.fail.length) {
+      out += sub('Not identified');
+      out += s.regoIdent.fail.map((x) => `• ${x}`).join('\n') + '\n';
     }
   }
 
-  // 4) Car Creator (if necessary)
-  if (s.carCreates.length) {
-    out += sect('(if necessary) Car Creator');
-    for (const c of s.carCreates) {
-      const detail = [c.make, c.model, c.rego].filter(Boolean).join(", ");
-      out += `Car Created: ${detail}${c.id ? ` [${c.id}]` : ""}\n`;
-    }
+  // Car creator
+  if (s.carCreated.length) {
+    out += box('CAR CREATOR');
+    out += s.carCreated.map((x) => `• ${x}`).join('\n') + '\n';
   }
 
-  // 5) Prompts — each prompt as its own block, in order received
-  if (s.prompts.length) {
-    for (const p of s.prompts) {
-      out += sect(`Prompt ${p.name}`);
-      out += "INPUT\n";
-      out += (p.inputText ? (p.inputText + "\n") : "[none]\n");
-      out += "\nOUTPUT\n";
-      out += (p.outputText ? (p.outputText + "\n") : "[none]\n");
-    }
+  // Prompts (INPUT/OUTPUT)
+  out += box('PROMPT: PHOTO_MERGER_SYSTEM');
+  out += sub('INPUT') + '(handled earlier in pipeline)\n';
+  out += sub('OUTPUT') + '(attach here if photo merger is invoked in this module)\n';
+
+  out += box('PROMPT: FILTER_SYSTEM');
+  out += sub('INPUT') + trimLongLines(renderMessagesArray(s.batched)) + '\n';
+  out += sub('OUTPUT') + trimLongLines(renderMessagesArray(s.p1)) + '\n';
+
+  out += box('PROMPT: REFINE_SYSTEM');
+  out += sub('INPUT') + trimLongLines(renderMessagesArray(s.p1)) + '\n';
+  out += sub('OUTPUT') + trimLongLines(renderMessagesArray(s.p2)) + '\n';
+
+  out += box('PROMPT: CATEGORIZE_SYSTEM');
+  out += sub('INPUT') + trimLongLines(renderMessagesArray(s.p2)) + '\n';
+  out += sub('OUTPUT') + trimLongLines(renderCategorized(s.p3)) + '\n';
+
+  // Extractors
+  if (s.extracts.length) {
+    out += box('EXTRACTORS — RAW OUTPUTS');
+    out += renderExtracts(s.extracts);
   }
 
-  // 6) Final output and actions
-  if (s.extractAll) {
-    out += sect('Final output and actions');
-    out += (s.extractAll + "\n");
+  // Final actions
+  out += box('FINAL OUTPUT & ACTIONS');
+  out += trimLongLines(renderActions(s.actions)) + '\n';
+
+  // QA / identification / changes
+  if (s.identNotes.length) {
+    out += box('IDENTIFICATION');
+    out += s.identNotes.join('\n') + '\n';
   }
-
-  // 7) AI Audit (QA) — printed last and clearly
-  if (s.qa) {
-    out += `\n${HR_LONG}\n${C.bold('AI AUDIT (QA)')}\n\n`;
-    try {
-      const qa = typeof s.qa === 'string' ? JSON.parse(s.qa) : s.qa;
-      const items = Array.isArray(qa.items) ? qa.items : [];
-      const summary = qa.summary || null;
-
-      if (summary) {
-        const sLine = `Summary: ok=${summary.ok ?? "-"}  flagged=${summary.flagged ?? "-"}  total=${summary.total ?? "-"}`;
-        out += sLine + "\n\n";
-      }
-
-      if (items.length) {
-        for (const it of items) {
-          const idx = (it.idx != null) ? `#${it.idx} ` : "";
-          const cat = it.category ? `[${it.category}] ` : "";
-          const reg = it.rego ? `${it.rego.toUpperCase()} ` : "";
-          out += `${idx}${cat}${reg}${it.ok === false ? 'FLAG' : 'OK'}\n`;
-          if (it.flag) out += `  FLAG: ${it.flag}\n`;
-          if (it.suggest) out += `  SUGGEST: ${it.suggest}\n`;
-          if (it.src) out += `  SRC: ${oneLine(it.src, 200)}\n`;
-          out += "\n";
-        }
-      } else {
-        out += "(no QA items)\n";
-      }
-    } catch {
-      out += oneLine(s.qa, 2000) + "\n";
-    }
-  }
-
-  // 8) Identification (optional)
-  if (s.ident.length) {
-    out += sect('Identification');
-    for (const line of s.ident) out += line + "\n";
-  }
-
-  // 9) Changes (optional)
   if (s.changes.length) {
-    out += sect('Changes');
-    for (const line of s.changes) out += "• " + line + "\n";
+    out += box('CHANGES');
+    out += s.changes.map((x) => `• ${x}`).join('\n') + '\n';
   }
 
-  // Final print + cleanup
-  console.log("\n" + out.trimEnd() + "\n");
+  out += '\n' + '─'.repeat(42) + '\n';
+
+  console.log(out);
   _store.delete(s.id);
 }
 
+// ---------------------------
+// Exports
+// ---------------------------
 module.exports = {
   newContext,
   get,
 
-  // Sections
+  // recorders
   recordBatch,
-  recordPhotoAnalysis,
-  recordRegoMatch,
-  recordCarCreate,
-  recordPrompt,
-
-  // Back-compat
+  recordPhoto,
+  recordRegoSuccess,
+  recordRegoFail,
+  recordCarCreated,
   recordP1,
   recordP2,
   recordP3,
-
-  // Extractors / final
   recordExtract,
   recordExtractAll,
 
-  // QA
-  recordQAAudit,
-
-  // Identity / changes
   identSuccess,
   identFail,
   change,
 
-  // Print
+  // printer
   print,
 };

@@ -1,93 +1,126 @@
 // src/services/ai/qa/qaCheck.js
-// Compact QA pass that returns human-readable one-liners (OK / FLAG).
+const { z } = require("zod");
+const { chatJSON } = require("../llmClient");
 
-function groupBy(arr, fn) {
-  return (arr || []).reduce((m, x) => {
-    const k = fn(x);
-    (m[k] ||= []).push(x);
-    return m;
-  }, {});
+// ---------- Env ----------
+const QA_AI = String(process.env.QA_AI || "1").trim() === "1"; // default ON
+const DEBUG = String(process.env.QA_DEBUG || "0").trim() === "1";
+const dbg = (...a) => DEBUG && console.log("[QA]", ...a);
+
+// ---------- Schemas ----------
+const AuditFlag = z.object({
+  code: z.string(),                          // e.g. "POSSIBLE_DUPLICATE", "REGO_MISMATCH"
+  severity: z.enum(["info", "warn", "error"]).default("warn"),
+  message: z.string().default(""),
+  actionIndexes: z.array(z.number().int().nonnegative()).default([]),
+});
+
+const AuditOut = z.object({
+  summary: z.string().default(""),
+  lines: z.array(z.string()).default([]),    // pretty, human-friendly bullet lines
+  flags: z.array(AuditFlag).default([]),     // machine-usable flags
+});
+
+// ---------- Helpers ----------
+function briefAction(a, idx) {
+  const base = [];
+  if (a.type) base.push(a.type);
+  const carBits = [a.rego, a.make, a.model].filter(Boolean).join(" • ");
+  if (carBits) base.push(carBits);
+  const details = [];
+  if (a.task) details.push(`task: ${a.task}`);
+  if (a.category) details.push(`category: ${a.category}`);
+  if (a.location) details.push(`location: ${a.location}`);
+  if (a.destination) details.push(`to: ${a.destination}`);
+  if (a.nextLocation) details.push(`next: ${a.nextLocation}`);
+  if (a.dateTime) details.push(`when: ${a.dateTime}`);
+  if (a.readiness) details.push(`ready: ${a.readiness}`);
+  if (a.notes) details.push(`notes: ${a.notes}`);
+  return `[${idx}] ${base.join(" — ")}${details.length ? ` — ${details.join(", ")}` : ""}`;
 }
 
-function toKey(a) {
-  return [
-    (a.rego || '').toUpperCase(),
-    (a.make || '').trim(),
-    (a.model || '').trim(),
-    (a.type || '').trim(),
-  ].join('|');
-}
-
-module.exports.audit = async function audit({ categorized = [], actions = [] }) {
-  const lines = [];
-
-  // 1) Basic validation + succinct OK lines
-  for (const a of actions || []) {
-    const rego = (a.rego || '').toUpperCase() || '—';
-    switch (a.type) {
-      case 'REPAIR': {
-        const task = a.checklistItem || 'repair';
-        lines.push(`OK • REPAIR • ${rego} — ${task}`);
-        break;
-      }
-      case 'RECON_APPOINTMENT': {
-        const cat = a.category || 'Uncategorized';
-        const svc = a.service ? ` • ${a.service}` : '';
-        lines.push(`OK • RECON_APPOINTMENT • ${rego} — ${cat}${svc}`);
-        break;
-      }
-      case 'LOCATION_UPDATE': {
-        lines.push(`OK • LOCATION_UPDATE • ${rego} — ${a.location || 'unknown'}`);
-        break;
-      }
-      case 'CUSTOMER_APPOINTMENT': {
-        lines.push(`OK • CUSTOMER_APPOINTMENT • ${rego} — ${(a.name || '—')} @ ${(a.dateTime || '—')}`);
-        break;
-      }
-      case 'READY':
-        lines.push(`OK • READY • ${rego}`);
-        break;
-      case 'DROP_OFF':
-        lines.push(`OK • DROP_OFF • ${rego} → ${a.destination || '—'}`);
-        break;
-      case 'NEXT_LOCATION':
-        lines.push(`OK • NEXT_LOCATION • ${rego} → ${a.nextLocation || '—'}`);
-        break;
-      case 'TASK':
-        lines.push(`OK • TASK • ${rego} — ${a.task || '—'}`);
-        break;
-      case 'SOLD':
-        lines.push(`OK • SOLD • ${rego}`);
-        break;
-      default:
-        lines.push(`OK • ${a.type || 'UNKNOWN'} • ${rego}`);
-    }
-  }
-
-  // 2) Duplicate recon category for same rego
-  const reconByRego = groupBy(
-    (actions || []).filter(a => a.type === 'RECON_APPOINTMENT'),
-    a => (a.rego || '').toUpperCase()
+function packInputs({ messages = [], actions = [] }) {
+  const msgLines = (Array.isArray(messages) ? messages : []).map(
+    (m) => `${m.speaker || "Unknown"}: ${m.text}`
   );
-  for (const [rego, list] of Object.entries(reconByRego)) {
-    const uniqueCats = [...new Set(list.map(x => x.category || ''))].filter(Boolean);
-    if (uniqueCats.length > 1) {
-      lines.push(`FLAG • RECON_APPOINTMENT • ${rego || '—'} — POSSIBLE_DUPLICATE (${uniqueCats.join(' vs ')})`);
-    }
+  const actionLines = (Array.isArray(actions) ? actions : []).map(briefAction);
+  return { msgLines, actionLines };
+}
+
+// ---------- System Prompt ----------
+const AUDIT_SYSTEM = `
+You are an expert QA auditor for a car-yard WhatsApp/Telegram pipeline.
+
+You receive:
+1) The normalized, actionable chat messages (speaker:text).
+2) The pipeline's extracted actions (typed JSON already summarized to one-line per action).
+
+Your job (READ-ONLY):
+- Check that actions are faithful to the messages (no hallucinated cars, times, people, places).
+- Check rego/make/model consistency across actions referring to the same car.
+- Spot obvious duplicates (same car + same meaning).
+- Spot conflicting actions (e.g., same car both SOLD and READY at same time).
+- Point out missing key info (e.g., customer name/time for appointments) when the message implied it should be there.
+
+Return STRICT minified JSON ONLY with this schema:
+{
+  "summary": "",                 // one short sentence
+  "lines": ["..."],              // clear bullet lines for humans (status like "OK • ...", "FLAG • ...")
+  "flags": [
+    {"code":"", "severity":"info|warn|error", "message":"", "actionIndexes":[0,2]}
+  ]
+}
+
+Flag codes to use (choose best fit):
+- "POSSIBLE_DUPLICATE"
+- "REGO_MISMATCH"
+- "CONFLICT"
+- "MISSING_DETAILS"
+- "NOT_SUPPORTED"
+- "LOW_CONFIDENCE"
+- "INFERRED_FACT"
+- "AMBIGUOUS"
+
+Rules:
+- Do NOT invent new actions or fix anything — this is a read-only audit.
+- Keep lines short and scannable (one sentence each).
+`;
+
+// ---------- Public API ----------
+async function audit({ messages = [], actions = [] }) {
+  // If disabled, return pass-through "no-op" audit.
+  if (!QA_AI) {
+    return {
+      summary: "QA disabled.",
+      lines: ["QA disabled (QA_AI=0)."],
+      flags: [],
+    };
   }
 
-  // 3) Exact duplicate action objects (type+rego+make+model) — likely repeats
-  const seen = new Map();
-  for (const a of actions || []) {
-    const k = toKey(a);
-    seen.set(k, (seen.get(k) || 0) + 1);
-  }
-  for (const [k, n] of seen.entries()) {
-    if (n > 1) {
-      const [rego, make, model, type] = k.split('|');
-      lines.push(`FLAG • ${type} • ${rego || '—'} — DUPLICATE (${make} ${model})`);
-    }
+  const { msgLines, actionLines } = packInputs({ messages, actions });
+  const user = [
+    "MESSAGES",
+    ...msgLines.map((x) => `- ${x}`),
+    "",
+    "ACTIONS",
+    ...actionLines.map((x) => `- ${x}`),
+  ].join("\n");
+
+  dbg("\n==== QA AUDIT USER PAYLOAD ====\n" + user + "\n===============================\n");
+
+  const raw = await chatJSON({ system: AUDIT_SYSTEM, user });
+  const parsed = AuditOut.safeParse(raw);
+
+  if (!parsed.success) {
+    dbg("QA parse failed, raw:", raw);
+    return {
+      summary: "QA parsing failed.",
+      lines: ["Audit result could not be parsed."],
+      flags: [{ code: "NOT_SUPPORTED", severity: "warn", message: "Audit result invalid JSON", actionIndexes: [] }],
+    };
   }
 
-  return { lines };
-};
+  return parsed.data;
+}
+
+module.exports = { audit };

@@ -3,11 +3,12 @@ const { z } = require('zod');
 const { chatJSON } = require('./llmClient');
 const P = require('../../prompts/pipelinePrompts');
 const timeline = require('../logging/timelineLogger');
-const qa = require('./qa/qaCheck');
 const ReconditionerCategory = require('../../models/ReconditionerCategory');
+const qa = require('./qa/qaCheck'); // <-- NEW
 
-// Verbose dev spam only if explicitly enabled
-const VERBOSE = String(process.env.PIPELINE_VERBOSE || '0').trim() === '1';
+// ---------- env / debug ----------
+const DEBUG = String(process.env.PIPELINE_DEBUG || '1').trim() === '1'; // default ON
+const dbg = (...args) => { if (DEBUG) console.log(...args); };
 
 /* ================================
    Zod Schemas
@@ -42,11 +43,8 @@ const ActionsOut = z.object({
 });
 
 /* ================================
-   Helpers
+   Helpers (keywords/rules/defaults)
 ================================ */
-const fmt = (msgs) => (Array.isArray(msgs) ? msgs : [])
-  .map((m) => `${m.speaker || 'Unknown'}: '${m.text}'`).join('\n');
-
 function buildAllowedCatsStringSorted(cats = []) {
   if (!Array.isArray(cats) || cats.length === 0) return '"Other"';
   const sorted = [...cats].sort((a, b) => {
@@ -72,35 +70,37 @@ function buildCatKeywordRuleMapString(cats = []) {
 }
 function buildCatDefaultServiceMapString(cats = []) {
   if (!Array.isArray(cats) || cats.length === 0) return '';
-  return cats.map((c) => `${String(c.name || '').trim()}: "${String(c.defaultService || '').trim()}"`).join('\n');
+  return cats.map((c) => {
+    const name = String(c.name || '').trim();
+    const def = String(c.defaultService || '').trim();
+    return `${name}: "${def}"`;
+  }).join('\n');
 }
 function buildReconHintsFlat(cats = []) {
   const set = new Set();
   for (const c of (Array.isArray(cats) ? cats : [])) {
-    for (const k of (c.keywords || [])) {
-      const v = String(k || '').trim().toLowerCase();
-      if (v) set.add(v);
-    }
-    for (const r of (c.rules || [])) {
-      const v = String(r || '').trim().toLowerCase();
-      if (v) set.add(v);
-    }
+    for (const k of (c.keywords || [])) set.add(String(k || '').trim().toLowerCase());
+    for (const r of (c.rules || [])) set.add(String(r || '').trim().toLowerCase());
   }
-  if (set.size === 0) return '';
-  return Array.from(set).map((s) => `- "${s}"`).join('\n');
+  return Array.from(set).filter(Boolean).map((s) => `- "${s}"`).join('\n');
 }
+const fmt = (msgs) => (Array.isArray(msgs) ? msgs : []).map((m) => `${m.speaker || 'Unknown'}: '${m.text}'`).join('\n');
 
 /* ================================
-   Duplication guarantees
+   Duplication Guarantees
 ================================ */
 function applyDuplicationRules(items) {
   const base = Array.isArray(items) ? items : [];
   const out = base.slice();
+
+  // Keep your existing duplication semantics
   for (const it of base) {
     if (it.category === 'REPAIR') out.push({ ...it, category: 'RECON_APPOINTMENT' });
     if (it.category === 'RECON_APPOINTMENT') out.push({ ...it, category: 'REPAIR' });
     if (it.category === 'DROP_OFF') out.push({ ...it, category: 'NEXT_LOCATION' });
   }
+
+  // Deduplicate (speaker+text+category)
   const seen = new Set();
   const deduped = [];
   for (const it of out) {
@@ -116,31 +116,36 @@ function applyDuplicationRules(items) {
 async function filterRefineCategorize(batch, tctx) {
   timeline.recordBatch(tctx, batch);
 
-  const fRaw = await chatJSON({ system: P.FILTER_SYSTEM, user: fmt(batch) });
-  timeline.recordP1(tctx, fRaw.messages || []);
-  timeline.recordPrompt(tctx, 'FILTER_SYSTEM', { messages: batch }, fRaw);
+  const f = FilterOut.parse(await chatJSON({ system: P.FILTER_SYSTEM, user: fmt(batch) }));
+  timeline.recordP1(tctx, f.messages);
 
-  const rRaw = await chatJSON({ system: P.REFINE_SYSTEM, user: fmt(fRaw.messages || []) });
-  timeline.recordP2(tctx, rRaw.messages || []);
-  timeline.recordPrompt(tctx, 'REFINE_SYSTEM', { messages: fRaw.messages || [] }, rRaw);
+  const r = FilterOut.parse(await chatJSON({ system: P.REFINE_SYSTEM, user: fmt(f.messages) }));
+  timeline.recordP2(tctx, r.messages);
 
+  // Load DB categories (keywords + rules)
   let cats = [];
-  try { cats = await ReconditionerCategory.find().lean(); } catch {}
+  try {
+    cats = await ReconditionerCategory.find().lean();
+  } catch (e) {
+    timeline.recordP3(tctx, { warn: 'failed to load categories for dynamic categorizer', error: e.message });
+  }
+
   const reconHintsFlat = buildReconHintsFlat(cats);
   const categorizeSystem = reconHintsFlat ? P.CATEGORIZE_SYSTEM_DYNAMIC(reconHintsFlat) : P.CATEGORIZE_SYSTEM;
 
-  if (VERBOSE) {
-    console.log('\n==== PIPELINE VERBOSE :: CATEGORIZER ====');
-    console.log(reconHintsFlat || '(no recon hints)');
+  if (DEBUG) {
+    console.log('\n==== PIPELINE DEBUG :: CATEGORIZER (Step 3) ====');
+    console.log('Recon hints (keywords + rules):\n' + (reconHintsFlat || '(none)'));
+    console.log('\n-- System prompt sent --\n' + categorizeSystem);
+    const userPayload = fmt(r.messages);
+    console.log('\n-- User payload --\n' + (userPayload || '(empty)'));
+    console.log('==============================================\n');
   }
 
-  const cRaw = await chatJSON({ system: categorizeSystem, user: fmt(rRaw.messages || []) });
-  timeline.recordPrompt(tctx, 'CATEGORIZE_SYSTEM', fmt(rRaw.messages || []), cRaw);
-
-  const c = CatOut.parse(cRaw);
+  const c = CatOut.parse(await chatJSON({ system: categorizeSystem, user: fmt(r.messages) }));
   const withDupes = applyDuplicationRules(c.items);
   timeline.recordP3(tctx, withDupes);
-  return { refined: rRaw.messages || [], categorized: withDupes };
+  return { refined: r.messages, categorized: withDupes };
 }
 
 /* ================================
@@ -159,46 +164,65 @@ async function extractActions(items, tctx) {
   async function run(cat, sys, label) {
     const user = by[cat].map((i) => `${i.speaker}: '${i.text}'`).join('\n');
     if (!user) return;
+
+    if (DEBUG && label !== 'recon_appointment_db') {
+      console.log(`\n==== PIPELINE DEBUG :: EXTRACTOR [${label}] ====`);
+      console.log('-- System prompt sent --\n' + sys);
+      console.log('\n-- User payload --\n' + user);
+      console.log('==============================================\n');
+    }
+
     const raw = await chatJSON({ system: sys, user });
     timeline.recordExtract(tctx, label, raw);
-    timeline.recordPrompt(tctx, `EXTRACT_${label.toUpperCase()}`, user, raw);
     const parsed = ActionsOut.safeParse(raw);
     if (parsed.success) actions.push(...parsed.data.actions);
   }
 
   await run('LOCATION_UPDATE', P.EXTRACT_LOCATION_UPDATE, 'location_update');
-  await run('SOLD',             P.EXTRACT_SOLD,            'sold');
-  await run('REPAIR',           P.EXTRACT_REPAIR,          'repair');
-  await run('READY',            P.EXTRACT_READY,           'ready');
-  await run('DROP_OFF',         P.EXTRACT_DROP_OFF,        'drop_off');
+  await run('SOLD', P.EXTRACT_SOLD, 'sold');
+  await run('REPAIR', P.EXTRACT_REPAIR, 'repair');
+  await run('READY', P.EXTRACT_READY, 'ready');
+  await run('DROP_OFF', P.EXTRACT_DROP_OFF, 'drop_off');
   await run('CUSTOMER_APPOINTMENT', P.EXTRACT_CUSTOMER_APPOINTMENT, 'customer_appointment');
 
+  // RECON extractor (DB-driven)
   if (by.RECON_APPOINTMENT.length > 0) {
     let cats = [];
-    try { cats = await ReconditionerCategory.find().lean(); } catch {}
+    try {
+      cats = await ReconditionerCategory.find().lean();
+    } catch (e) {
+      timeline.recordExtract(tctx, 'recon_cats_error', { error: e.message });
+    }
+
     const allowed     = buildAllowedCatsStringSorted(cats);
     const mapKwRules  = buildCatKeywordRuleMapString(cats);
     const mapDefaults = buildCatDefaultServiceMapString(cats);
 
     const sys = P.EXTRACT_RECON_APPOINTMENT_FROM_DB(allowed, mapKwRules, mapDefaults);
     const user = by.RECON_APPOINTMENT.map((i) => `${i.speaker}: '${i.text}'`).join('\n');
+
+    if (DEBUG) {
+      console.log('\n==== PIPELINE DEBUG :: RECON EXTRACTOR (Step 4) ====');
+      console.log('Allowed categories:\n' + allowed);
+      console.log('\nKeyword/rule mapping:\n' + (mapKwRules || '(none)'));
+      console.log('\nDefault services:\n' + (mapDefaults || '(none)'));
+      console.log('\n-- System prompt sent --\n' + sys);
+      console.log('\n-- User payload --\n' + (user || '(empty)'));
+      console.log('==================================================\n');
+    }
+
     if (user) {
       const raw = await chatJSON({ system: sys, user });
       timeline.recordExtract(tctx, 'recon_appointment_db', raw);
-      timeline.recordPrompt(
-        tctx,
-        'EXTRACT_RECON_APPOINTMENT',
-        { allowed, keywordsRules: mapKwRules, defaultServices: mapDefaults, user },
-        raw
-      );
       const parsed = ActionsOut.safeParse(raw);
       if (parsed.success) actions.push(...parsed.data.actions);
     }
   }
 
-  await run('NEXT_LOCATION',    P.EXTRACT_NEXT_LOCATION,   'next_location');
-  await run('TASK',             P.EXTRACT_TASK,            'task');
+  await run('NEXT_LOCATION', P.EXTRACT_NEXT_LOCATION, 'next_location');
+  await run('TASK', P.EXTRACT_TASK, 'task');
 
+  // normalize rego
   for (const a of actions) {
     if ('rego' in a && a.rego) a.rego = a.rego.replace(/\s+/g, '').toUpperCase();
   }
@@ -211,18 +235,22 @@ async function extractActions(items, tctx) {
    Public API
 ================================ */
 async function processBatch(messages, tctx) {
-  for (const m of messages || []) timeline.recordMessage(tctx, m.speaker || 'Unknown', m.text || '');
-
-  const { categorized } = await filterRefineCategorize(messages, tctx);
+  const { refined, categorized } = await filterRefineCategorize(messages, tctx);
   const actions = await extractActions(categorized, tctx);
 
+  // ----- AI QA (read-only) -----
   try {
-    const audit = await qa.audit({ categorized, actions });
-    for (const line of (audit?.lines || [])) timeline.auditLine(tctx, line);
+    const audit = await qa.audit({ messages: refined, actions });
+    timeline.recordAudit(tctx, audit); // neatly prints in "AI AUDIT (READ-ONLY)" section
   } catch (e) {
-    timeline.auditLine(tctx, `QA audit failed: ${e.message}`);
+    timeline.recordAudit(tctx, {
+      summary: "QA failed",
+      lines: [`Audit error: ${e.message}`],
+      flags: [{ code: "NOT_SUPPORTED", severity: "warn", message: "QA threw", actionIndexes: [] }],
+    });
   }
 
+  // No enforcement here — read-only
   return { actions, categorized };
 }
 

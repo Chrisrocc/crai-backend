@@ -1,175 +1,123 @@
 // src/services/logging/timelineLogger.js
-const { randomUUID } = require("crypto");
+const { randomUUID } = require('crypto');
 
 const _store = new Map();
 
 function newContext({ chatId }) {
-  const id = typeof randomUUID === "function" ? randomUUID() : Math.random().toString(36).slice(2) + Date.now();
+  const id = typeof randomUUID === 'function'
+    ? randomUUID()
+    : Math.random().toString(36).slice(2) + Date.now();
   const ctx = {
     id,
     chatId,
-    batched: [],
-    p1: [],
-    p2: [],
-    p3: [],
-    extracts: [],
-    extractAll: "",
-    ident: [],
-    changes: [],
-    // QA
-    qaSummary: "",
-    qaLines: [],
-    qaFlags: [],
+    sections: [],     // pretty, ordered blocks
+    extracts: [],     // raw extractor dumps (kept compact)
+    actions: [],      // final actions (compact)
+    audit: null,      // AI audit result
   };
   _store.set(id, ctx);
   return ctx;
 }
 
 function get(idOrCtx) {
-  const id = typeof idOrCtx === "string" ? idOrCtx : idOrCtx?.id;
+  const id = typeof idOrCtx === 'string' ? idOrCtx : idOrCtx?.id;
   return _store.get(id) || null;
 }
 
-// -------- Basic sections --------
-function recordBatch(ctx, messages = []) {
+// ---------- section helpers ----------
+function section(ctx, title, lines = []) {
   const s = get(ctx); if (!s) return;
-  s.batched = messages.map((m) => `${m.speaker || "Unknown"}: '${m.text}'`);
+  s.sections.push({
+    title,
+    lines: (Array.isArray(lines) ? lines : [String(lines || '')]).filter(Boolean),
+  });
 }
-function recordP1(ctx, messages = []) {
+function prompt(ctx, name, { inputText = '', outputText = '' } = {}) {
   const s = get(ctx); if (!s) return;
-  s.p1 = messages.map((m) => `${m.speaker || "Unknown"}: '${m.text}'`);
+  s.sections.push({
+    title: `PROMPT: ${name}`,
+    lines: [
+      '— INPUT —',
+      inputText,
+      '— OUTPUT —',
+      outputText,
+    ].filter(Boolean),
+  });
 }
-function recordP2(ctx, messages = []) {
+function actions(ctx, acts = []) {
   const s = get(ctx); if (!s) return;
-  s.p2 = messages.map((m) => `${m.speaker || "Unknown"}: '${m.text}'`);
+  s.actions = Array.isArray(acts) ? acts : [];
 }
-function recordP3(ctx, items = []) {
+function recordAudit(ctx, auditObj) {
   const s = get(ctx); if (!s) return;
-  s.p3 = items.map((i) => ({ text: `${i.speaker || "Unknown"}: '${i.text}'`, category: i.category }));
-}
-
-// -------- Extractors --------
-function recordExtract(ctx, label, rawObj) {
-  const s = get(ctx); if (!s) return;
-  try { s.extracts.push({ label, jsonString: JSON.stringify(rawObj) }); }
-  catch { s.extracts.push({ label, jsonString: '{"actions":[]}' }); }
-}
-function recordExtractAll(ctx, actions = []) {
-  const s = get(ctx); if (!s) return;
-  try { s.extractAll = JSON.stringify({ actions }); }
-  catch { s.extractAll = '{"actions":[]}'; }
-}
-
-// -------- Identification & changes --------
-function identSuccess(ctx, { rego = "", make = "", model = "" } = {}) {
-  const s = get(ctx); if (!s) return;
-  const label = rego || [make, model].filter(Boolean).join(" ");
-  s.ident.push(`✓ Identified: ${label || "(unknown)"}`);
-}
-function identFail(ctx, { reason = "", rego = "", make = "", model = "" } = {}) {
-  const s = get(ctx); if (!s) return;
-  const input = rego || [make, model].filter(Boolean).join(" ");
-  s.ident.push(`✗ Not identified${input ? ` (${input})` : ""}: ${reason}`);
-}
-function change(ctx, text = "") {
-  const s = get(ctx); if (!s) return;
-  if (text) s.changes.push(text);
+  s.audit = auditObj || null;
 }
 
-// -------- QA (Audit) --------
-function recordAudit(ctx, { summary = "", lines = [], flags = [] } = {}) {
-  const s = get(ctx); if (!s) return;
-  s.qaSummary = summary || "";
-  s.qaLines = Array.isArray(lines) ? lines.slice() : [];
-  s.qaFlags = Array.isArray(flags) ? flags.slice() : [];
-}
-function auditLine(ctx, line) {
-  const s = get(ctx); if (!s) return;
-  if (line) s.qaLines.push(line);
-}
-
-// -------- Printer --------
+// ---------- pretty print ----------
 function print(ctx) {
   const s = get(ctx); if (!s) return;
 
-  // Small helper to format as your clean boxes
-  const box = (title, bodyLines) => {
-    if (!bodyLines || (Array.isArray(bodyLines) && bodyLines.length === 0)) return "";
-    const body = Array.isArray(bodyLines) ? bodyLines.join("\n  - ") : bodyLines;
-    return [
-      "",
-      `──────────────────────────────────`,
-      ` ${title}`,
-      `──────────────────────────────────`,
-      Array.isArray(bodyLines) ? `  - ${body}` : bodyLines,
-    ].join("\n");
-  };
+  const sep = (t) => `\n${t}\n${'─'.repeat(t.length)}\n`;
+  const box = (t) => `\n${'='.repeat(t.length + 2)}\n ${t}\n${'='.repeat(t.length + 2)}\n`;
 
-  const sec = [];
-
-  // Messages
-  if (s.batched.length) sec.push(box("MESSAGES", s.batched.map((x) => x.replace(/^(.+)$/, "$1"))));
-
-  // Prompts
-  if (s.p1.length) sec.push(box("FILTER", s.p1));
-  if (s.p2.length) sec.push(box("REFINE", s.p2));
-  if (s.p3.length) {
-    const cats = s.p3.map((i) => `${i.category} — ${i.text}`);
-    sec.push(box("CATEGORIZE", cats));
+  // 1) Ordered content sections (Messages, Filter, Refine, Categorize, Prompts…)
+  for (const blk of s.sections) {
+    console.log(sep(blk.title));
+    for (const line of blk.lines) console.log(line);
   }
 
-  // Extractors (pretty)
-  if (s.extracts.length) {
-    const lines = [];
-    for (const ex of s.extracts) {
-      lines.push(`# ${ex.label.toUpperCase()}`);
-      lines.push(ex.jsonString);
+  // 2) Final Actions (compact & human)
+  if (s.actions.length) {
+    console.log(box('FINAL OUTPUT & ACTIONS'));
+    for (const a of s.actions) {
+      const car = [a.rego, [a.make, a.model].filter(Boolean).join(' ')].filter(Boolean).join(' • ');
+      let detail = '';
+      if (a.type === 'REPAIR' && a.checklistItem) detail = `, task: ${a.checklistItem}`;
+      else if (a.type === 'READY' && a.readiness) detail = `, readiness: ${a.readiness}`;
+      else if (a.type === 'DROP_OFF' && a.destination) detail = `, destination: ${a.destination}`;
+      else if (a.type === 'CUSTOMER_APPOINTMENT') detail = `, name: ${a.name}${a.dateTime ? `, dateTime: ${a.dateTime}` : ''}`;
+      else if (a.type === 'RECON_APPOINTMENT') detail = `, category: ${a.category}${a.service ? `, service: ${a.service}` : ''}`;
+      else if (a.type === 'NEXT_LOCATION' && a.nextLocation) detail = `, nextLocation: ${a.nextLocation}`;
+      else if (a.type === 'TASK' && a.task) detail = `, task: ${a.task}`;
+      console.log(`- ${a.type}: {${car || 'no-rego'}${detail}}`);
     }
-    sec.push(box("EXTRACTORS — RAW OUTPUTS", lines));
   }
 
-  // Combined actions
-  if (s.extractAll) sec.push(box("ACTIONS (COMBINED)", [s.extractAll]));
+  // 3) AI AUDIT (per-action justification)
+  if (s.audit && s.audit.items?.length) {
+    const sum = s.audit.summary || { total: 0, correct: 0, partial: 0, incorrect: 0, unsure: 0 };
+    console.log(box(`AI AUDIT — total:${sum.total} ✓${sum.correct} ~${sum.partial} ✗${sum.incorrect} ?${sum.unsure}`));
+    for (const it of s.audit.items) {
+      const a = s.actions[it.actionIndex];
+      if (!a) continue;
+      const car = [a.rego, [a.make, a.model].filter(Boolean).join(' ')].filter(Boolean).join(' • ');
+      const short =
+        a.type === 'REPAIR' && a.checklistItem ? `— ${a.checklistItem}` :
+        a.type === 'RECON_APPOINTMENT' && (a.category || a.service) ? `— ${[a.category, a.service].filter(Boolean).join(' / ')}` :
+        a.type === 'DROP_OFF' && a.destination ? `— ${a.destination}` :
+        a.type === 'READY' && a.readiness ? `— ${a.readiness}` :
+        a.type === 'CUSTOMER_APPOINTMENT' && a.name ? `— ${a.name}${a.dateTime ? ` @ ${a.dateTime}` : ''}` :
+        a.type === 'NEXT_LOCATION' && a.nextLocation ? `— ${a.nextLocation}` :
+        a.type === 'TASK' && a.task ? `— ${a.task}` : '';
 
-  // Identification + Changes
-  if (s.ident.length) sec.push(box("IDENTIFICATION", s.ident));
-  if (s.changes.length) sec.push(box("CHANGES", s.changes));
-
-  // QA AUDIT — clean & compact
-  if (s.qaSummary || s.qaLines.length || s.qaFlags.length) {
-    const qaOut = [];
-    if (s.qaSummary) qaOut.push(`Summary: ${s.qaSummary}`);
-    if (s.qaLines.length) {
-      // already human-readable lines from the model
-      qaOut.push(...s.qaLines);
+      console.log(
+        `- ${a.type} ${car || ''} ${short} — ${it.verdict}` +
+        (it.evidenceText ? ` — evidence: "${it.evidenceText}"` : '') +
+        (it.evidenceSourceIndex ? ` — from: ${it.evidenceSourceIndex}` : '')
+      );
+      if (it.reason) console.log(`  reason: ${it.reason}`);
     }
-    if (s.qaFlags.length) {
-      for (const f of s.qaFlags) {
-        const idxs = (f.actionIndexes || []).join(",");
-        qaOut.push(`FLAG • ${f.severity.toUpperCase()} • ${f.code}${idxs ? ` • actions [${idxs}]` : ""} — ${f.message}`);
-      }
-    }
-    sec.push(box("AI AUDIT (READ-ONLY)", qaOut));
   }
 
-  console.log(sec.join("\n") + "\n");
+  console.log('\n' + '═'.repeat(42) + '\n');
   _store.delete(s.id);
 }
 
 module.exports = {
   newContext,
-  recordBatch,
-  recordP1,
-  recordP2,
-  recordP3,
-  recordExtract,
-  recordExtractAll,
-  identSuccess,
-  identFail,
-  change,
-  // QA
+  section,
+  prompt,
+  actions,
   recordAudit,
-  auditLine,
-  // Print
   print,
 };

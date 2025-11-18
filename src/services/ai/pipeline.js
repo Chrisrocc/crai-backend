@@ -4,10 +4,10 @@ const { chatJSON } = require('./llmClient');
 const P = require('../../prompts/pipelinePrompts');
 const timeline = require('../logging/timelineLogger');
 const ReconditionerCategory = require('../../models/ReconditionerCategory');
-const qa = require('./qa/qaCheck'); // <-- NEW
+const { runAudit } = require('./qa/qaCheck'); // ← NEW
 
 // ---------- env / debug ----------
-const DEBUG = String(process.env.PIPELINE_DEBUG || '1').trim() === '1'; // default ON
+const DEBUG = String(process.env.PIPELINE_DEBUG || '1').trim() === '1';
 const dbg = (...args) => { if (DEBUG) console.log(...args); };
 
 /* ================================
@@ -43,8 +43,9 @@ const ActionsOut = z.object({
 });
 
 /* ================================
-   Helpers (keywords/rules/defaults)
+   Helpers for dynamic prompts
 ================================ */
+// (unchanged helpers)
 function buildAllowedCatsStringSorted(cats = []) {
   if (!Array.isArray(cats) || cats.length === 0) return '"Other"';
   const sorted = [...cats].sort((a, b) => {
@@ -57,32 +58,43 @@ function buildAllowedCatsStringSorted(cats = []) {
 }
 function buildCatKeywordRuleMapString(cats = []) {
   if (!Array.isArray(cats) || cats.length === 0) return '';
-  return cats.map((c) => {
-    const name = String(c.name || '').trim();
-    const items = [
-      ...((c.keywords || []).map((k) => String(k).trim().toLowerCase()).filter(Boolean)),
-      ...((c.rules || []).map((r) => String(r).trim().toLowerCase()).filter(Boolean)),
-    ];
-    const uniq = Array.from(new Set(items));
-    const list = uniq.map((t) => `"${t}"`).join(', ');
-    return `${name}: [${list}]`;
-  }).join('\n');
+  return cats
+    .map((c) => {
+      const name = String(c.name || '').trim();
+      const items = [
+        ...((c.keywords || []).map((k) => String(k).trim().toLowerCase()).filter(Boolean)),
+        ...((c.rules || []).map((r) => String(r).trim().toLowerCase()).filter(Boolean)),
+      ];
+      const uniq = Array.from(new Set(items));
+      const list = uniq.map((t) => `"${t}"`).join(', ');
+      return `${name}: [${list}]`;
+    })
+    .join('\n');
 }
 function buildCatDefaultServiceMapString(cats = []) {
   if (!Array.isArray(cats) || cats.length === 0) return '';
-  return cats.map((c) => {
-    const name = String(c.name || '').trim();
-    const def = String(c.defaultService || '').trim();
-    return `${name}: "${def}"`;
-  }).join('\n');
+  return cats
+    .map((c) => {
+      const name = String(c.name || '').trim();
+      const def = String(c.defaultService || '').trim();
+      return `${name}: "${def}"`;
+    })
+    .join('\n');
 }
 function buildReconHintsFlat(cats = []) {
   const set = new Set();
   for (const c of (Array.isArray(cats) ? cats : [])) {
-    for (const k of (c.keywords || [])) set.add(String(k || '').trim().toLowerCase());
-    for (const r of (c.rules || [])) set.add(String(r || '').trim().toLowerCase());
+    for (const k of (c.keywords || [])) {
+      const v = String(k || '').trim().toLowerCase();
+      if (v) set.add(v);
+    }
+    for (const r of (c.rules || [])) {
+      const v = String(r || '').trim().toLowerCase();
+      if (v) set.add(v);
+    }
   }
-  return Array.from(set).filter(Boolean).map((s) => `- "${s}"`).join('\n');
+  if (set.size === 0) return '';
+  return Array.from(set).map((s) => `- "${s}"`).join('\n');
 }
 const fmt = (msgs) => (Array.isArray(msgs) ? msgs : []).map((m) => `${m.speaker || 'Unknown'}: '${m.text}'`).join('\n');
 
@@ -92,15 +104,11 @@ const fmt = (msgs) => (Array.isArray(msgs) ? msgs : []).map((m) => `${m.speaker 
 function applyDuplicationRules(items) {
   const base = Array.isArray(items) ? items : [];
   const out = base.slice();
-
-  // Keep your existing duplication semantics
   for (const it of base) {
     if (it.category === 'REPAIR') out.push({ ...it, category: 'RECON_APPOINTMENT' });
     if (it.category === 'RECON_APPOINTMENT') out.push({ ...it, category: 'REPAIR' });
     if (it.category === 'DROP_OFF') out.push({ ...it, category: 'NEXT_LOCATION' });
   }
-
-  // Deduplicate (speaker+text+category)
   const seen = new Set();
   const deduped = [];
   for (const it of out) {
@@ -114,22 +122,16 @@ function applyDuplicationRules(items) {
    Step 1–3: Filter → Refine → Categorize
 ================================ */
 async function filterRefineCategorize(batch, tctx) {
-  timeline.recordBatch(tctx, batch);
-
+  timeline.section(tctx, "MESSAGES", fmt(batch).split("\n"));
   const f = FilterOut.parse(await chatJSON({ system: P.FILTER_SYSTEM, user: fmt(batch) }));
-  timeline.recordP1(tctx, f.messages);
+  timeline.section(tctx, "FILTER", f.messages.map(m => `${m.speaker}: ${m.text}`));
 
   const r = FilterOut.parse(await chatJSON({ system: P.REFINE_SYSTEM, user: fmt(f.messages) }));
-  timeline.recordP2(tctx, r.messages);
+  timeline.section(tctx, "REFINE", r.messages.map(m => `${m.speaker}: ${m.text}`));
 
-  // Load DB categories (keywords + rules)
+  // Categories (dynamic)
   let cats = [];
-  try {
-    cats = await ReconditionerCategory.find().lean();
-  } catch (e) {
-    timeline.recordP3(tctx, { warn: 'failed to load categories for dynamic categorizer', error: e.message });
-  }
-
+  try { cats = await ReconditionerCategory.find().lean(); } catch {}
   const reconHintsFlat = buildReconHintsFlat(cats);
   const categorizeSystem = reconHintsFlat ? P.CATEGORIZE_SYSTEM_DYNAMIC(reconHintsFlat) : P.CATEGORIZE_SYSTEM;
 
@@ -143,8 +145,8 @@ async function filterRefineCategorize(batch, tctx) {
   }
 
   const c = CatOut.parse(await chatJSON({ system: categorizeSystem, user: fmt(r.messages) }));
+  timeline.section(tctx, "CATEGORIZE", c.items.map(i => `${i.category} — ${i.speaker}: '${i.text}'`));
   const withDupes = applyDuplicationRules(c.items);
-  timeline.recordP3(tctx, withDupes);
   return { refined: r.messages, categorized: withDupes };
 }
 
@@ -160,74 +162,50 @@ async function extractActions(items, tctx) {
   for (const it of items) (by[it.category] || by.OTHER).push(it);
 
   const actions = [];
-
   async function run(cat, sys, label) {
     const user = by[cat].map((i) => `${i.speaker}: '${i.text}'`).join('\n');
     if (!user) return;
-
-    if (DEBUG && label !== 'recon_appointment_db') {
-      console.log(`\n==== PIPELINE DEBUG :: EXTRACTOR [${label}] ====`);
-      console.log('-- System prompt sent --\n' + sys);
-      console.log('\n-- User payload --\n' + user);
-      console.log('==============================================\n');
-    }
-
     const raw = await chatJSON({ system: sys, user });
-    timeline.recordExtract(tctx, label, raw);
+    timeline.prompt(tctx, label, { inputText: user, outputText: JSON.stringify(raw) });
     const parsed = ActionsOut.safeParse(raw);
     if (parsed.success) actions.push(...parsed.data.actions);
   }
 
-  await run('LOCATION_UPDATE', P.EXTRACT_LOCATION_UPDATE, 'location_update');
-  await run('SOLD', P.EXTRACT_SOLD, 'sold');
-  await run('REPAIR', P.EXTRACT_REPAIR, 'repair');
-  await run('READY', P.EXTRACT_READY, 'ready');
-  await run('DROP_OFF', P.EXTRACT_DROP_OFF, 'drop_off');
-  await run('CUSTOMER_APPOINTMENT', P.EXTRACT_CUSTOMER_APPOINTMENT, 'customer_appointment');
+  await run('LOCATION_UPDATE', P.EXTRACT_LOCATION_UPDATE, 'EXTRACT_LOCATION_UPDATE');
+  await run('SOLD', P.EXTRACT_SOLD, 'EXTRACT_SOLD');
+  await run('REPAIR', P.EXTRACT_REPAIR, 'EXTRACT_REPAIR');
+  await run('READY', P.EXTRACT_READY, 'EXTRACT_READY');
+  await run('DROP_OFF', P.EXTRACT_DROP_OFF, 'EXTRACT_DROP_OFF');
+  await run('CUSTOMER_APPOINTMENT', P.EXTRACT_CUSTOMER_APPOINTMENT, 'EXTRACT_CUSTOMER_APPOINTMENT');
 
-  // RECON extractor (DB-driven)
   if (by.RECON_APPOINTMENT.length > 0) {
     let cats = [];
-    try {
-      cats = await ReconditionerCategory.find().lean();
-    } catch (e) {
-      timeline.recordExtract(tctx, 'recon_cats_error', { error: e.message });
-    }
-
+    try { cats = await ReconditionerCategory.find().lean(); } catch {}
     const allowed     = buildAllowedCatsStringSorted(cats);
     const mapKwRules  = buildCatKeywordRuleMapString(cats);
     const mapDefaults = buildCatDefaultServiceMapString(cats);
 
     const sys = P.EXTRACT_RECON_APPOINTMENT_FROM_DB(allowed, mapKwRules, mapDefaults);
     const user = by.RECON_APPOINTMENT.map((i) => `${i.speaker}: '${i.text}'`).join('\n');
-
-    if (DEBUG) {
-      console.log('\n==== PIPELINE DEBUG :: RECON EXTRACTOR (Step 4) ====');
-      console.log('Allowed categories:\n' + allowed);
-      console.log('\nKeyword/rule mapping:\n' + (mapKwRules || '(none)'));
-      console.log('\nDefault services:\n' + (mapDefaults || '(none)'));
-      console.log('\n-- System prompt sent --\n' + sys);
-      console.log('\n-- User payload --\n' + (user || '(empty)'));
-      console.log('==================================================\n');
-    }
-
     if (user) {
       const raw = await chatJSON({ system: sys, user });
-      timeline.recordExtract(tctx, 'recon_appointment_db', raw);
+      timeline.prompt(tctx, 'EXTRACT_RECON_APPOINTMENT', {
+        inputText: `Allowed:\n${allowed}\n\nKeywords/Rules:\n${mapKwRules}\n\nDefault services:\n${mapDefaults}\n\nUSER:\n${user}`,
+        outputText: JSON.stringify(raw),
+      });
       const parsed = ActionsOut.safeParse(raw);
       if (parsed.success) actions.push(...parsed.data.actions);
     }
   }
 
-  await run('NEXT_LOCATION', P.EXTRACT_NEXT_LOCATION, 'next_location');
-  await run('TASK', P.EXTRACT_TASK, 'task');
+  await run('NEXT_LOCATION', P.EXTRACT_NEXT_LOCATION, 'EXTRACT_NEXT_LOCATION');
+  await run('TASK', P.EXTRACT_TASK, 'EXTRACT_TASK');
 
-  // normalize rego
   for (const a of actions) {
     if ('rego' in a && a.rego) a.rego = a.rego.replace(/\s+/g, '').toUpperCase();
   }
 
-  timeline.recordExtractAll(tctx, actions);
+  timeline.actions(tctx, actions);
   return actions;
 }
 
@@ -238,19 +216,10 @@ async function processBatch(messages, tctx) {
   const { refined, categorized } = await filterRefineCategorize(messages, tctx);
   const actions = await extractActions(categorized, tctx);
 
-  // ----- AI QA (read-only) -----
-  try {
-    const audit = await qa.audit({ messages: refined, actions });
-    timeline.recordAudit(tctx, audit); // neatly prints in "AI AUDIT (READ-ONLY)" section
-  } catch (e) {
-    timeline.recordAudit(tctx, {
-      summary: "QA failed",
-      lines: [`Audit error: ${e.message}`],
-      flags: [{ code: "NOT_SUPPORTED", severity: "warn", message: "QA threw", actionIndexes: [] }],
-    });
-  }
+  // ---- AI AUDIT (read-only, per-action justification) ----
+  const audit = await runAudit({ batch: messages, refined, actions });
+  timeline.recordAudit(tctx, audit);
 
-  // No enforcement here — read-only
   return { actions, categorized };
 }
 

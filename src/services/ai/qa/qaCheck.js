@@ -1,126 +1,122 @@
 // src/services/ai/qa/qaCheck.js
+//
+// Read-only AI audit for pipeline outputs.
+// Compares each extracted action against the source messages and returns
+// short, human-readable justifications per action.
+//
+// Usage:
+//   const audit = await runAudit({ batch, refined, categorized, actions });
+//   timeline.recordAudit(tctx, audit); // pretty printing handled by timeline logger
+
 const { z } = require("zod");
 const { chatJSON } = require("../llmClient");
 
-// ---------- Env ----------
-const QA_AI = String(process.env.QA_AI || "1").trim() === "1"; // default ON
-const DEBUG = String(process.env.QA_DEBUG || "0").trim() === "1";
-const dbg = (...a) => DEBUG && console.log("[QA]", ...a);
-
-// ---------- Schemas ----------
-const AuditFlag = z.object({
-  code: z.string(),                          // e.g. "POSSIBLE_DUPLICATE", "REGO_MISMATCH"
-  severity: z.enum(["info", "warn", "error"]).default("warn"),
-  message: z.string().default(""),
-  actionIndexes: z.array(z.number().int().nonnegative()).default([]),
+// ---------- Zod schemas (LLM contract) ----------
+const AuditItem = z.object({
+  actionIndex: z.number().int().nonnegative(),
+  verdict: z.enum(["CORRECT", "PARTIAL", "INCORRECT", "UNSURE"]),
+  // very short reason like: "Message explicitly mentions 'engine replacement'."
+  reason: z.string().default(""),
+  // the minimal snippet from source that justifies the verdict
+  evidenceText: z.string().default(""),
+  // which source line the snippet came from (index into provided messages)
+  evidenceSourceIndex: z.number().int().nonnegative().optional(),
 });
 
 const AuditOut = z.object({
-  summary: z.string().default(""),
-  lines: z.array(z.string()).default([]),    // pretty, human-friendly bullet lines
-  flags: z.array(AuditFlag).default([]),     // machine-usable flags
+  summary: z.object({
+    total: z.number().int(),
+    correct: z.number().int(),
+    partial: z.number().int(),
+    incorrect: z.number().int(),
+    unsure: z.number().int(),
+  }),
+  items: z.array(AuditItem),
 });
 
 // ---------- Helpers ----------
-function briefAction(a, idx) {
-  const base = [];
-  if (a.type) base.push(a.type);
-  const carBits = [a.rego, a.make, a.model].filter(Boolean).join(" • ");
-  if (carBits) base.push(carBits);
-  const details = [];
-  if (a.task) details.push(`task: ${a.task}`);
-  if (a.category) details.push(`category: ${a.category}`);
-  if (a.location) details.push(`location: ${a.location}`);
-  if (a.destination) details.push(`to: ${a.destination}`);
-  if (a.nextLocation) details.push(`next: ${a.nextLocation}`);
-  if (a.dateTime) details.push(`when: ${a.dateTime}`);
-  if (a.readiness) details.push(`ready: ${a.readiness}`);
-  if (a.notes) details.push(`notes: ${a.notes}`);
-  return `[${idx}] ${base.join(" — ")}${details.length ? ` — ${details.join(", ")}` : ""}`;
+function fmtMsgs(msgs) {
+  return (Array.isArray(msgs) ? msgs : [])
+    .map((m, i) => `${i + 1}. ${m.speaker || "Unknown"}: ${m.text}`)
+    .join("\n");
 }
 
-function packInputs({ messages = [], actions = [] }) {
-  const msgLines = (Array.isArray(messages) ? messages : []).map(
-    (m) => `${m.speaker || "Unknown"}: ${m.text}`
-  );
-  const actionLines = (Array.isArray(actions) ? actions : []).map(briefAction);
-  return { msgLines, actionLines };
+function fmtActions(actions) {
+  return (Array.isArray(actions) ? actions : [])
+    .map(
+      (a, i) =>
+        `${i + 1}. ${a.type}` +
+        ` | rego:${a.rego || ""}` +
+        (a.make || a.model ? ` | ${[a.make, a.model].filter(Boolean).join(" ")}` : "") +
+        (a.checklistItem ? ` | checklistItem:${a.checklistItem}` : "") +
+        (a.readiness ? ` | readiness:${a.readiness}` : "") +
+        (a.destination ? ` | destination:${a.destination}` : "") +
+        (a.nextLocation ? ` | nextLocation:${a.nextLocation}` : "") +
+        (a.category ? ` | category:${a.category}` : "") +
+        (a.dateTime ? ` | dateTime:${a.dateTime}` : "") +
+        (a.task ? ` | task:${a.task}` : "")
+    )
+    .join("\n");
 }
 
-// ---------- System Prompt ----------
-const AUDIT_SYSTEM = `
-You are an expert QA auditor for a car-yard WhatsApp/Telegram pipeline.
+// ---------- System prompt ----------
+const SYSTEM = `
+You are auditing extracted "actions" against the original chat messages from a car yard workflow.
+Your job: for EACH action, decide if it is supported by the messages and show a very short justification.
 
-You receive:
-1) The normalized, actionable chat messages (speaker:text).
-2) The pipeline's extracted actions (typed JSON already summarized to one-line per action).
+Return STRICT minified JSON only with this schema:
+{"summary":{"total":0,"correct":0,"partial":0,"incorrect":0,"unsure":0},"items":[{"actionIndex":0,"verdict":"CORRECT","reason":"","evidenceText":"","evidenceSourceIndex":0}]}
 
-Your job (READ-ONLY):
-- Check that actions are faithful to the messages (no hallucinated cars, times, people, places).
-- Check rego/make/model consistency across actions referring to the same car.
-- Spot obvious duplicates (same car + same meaning).
-- Spot conflicting actions (e.g., same car both SOLD and READY at same time).
-- Point out missing key info (e.g., customer name/time for appointments) when the message implied it should be there.
+Guidelines:
+- CORRECT: The message clearly supports this action (matching car and detail). Quote the smallest helpful snippet as evidenceText.
+- PARTIAL: The car is correct, but some important detail (time/place/service/task) is missing or ambiguous. Show the closest snippet.
+- INCORRECT: The message contradicts the action (wrong car/detail) or the action invents info not present in any message.
+- UNSURE: The message hints at the action but is too vague to be confident.
 
-Return STRICT minified JSON ONLY with this schema:
-{
-  "summary": "",                 // one short sentence
-  "lines": ["..."],              // clear bullet lines for humans (status like "OK • ...", "FLAG • ...")
-  "flags": [
-    {"code":"", "severity":"info|warn|error", "message":"", "actionIndexes":[0,2]}
-  ]
-}
+Keep reason very short (one sentence). evidenceText must be a minimal quote from the message (not your paraphrase).
+For evidenceSourceIndex, use the 1-based index of the message line you quoted; omit the field if no single line fits.
 
-Flag codes to use (choose best fit):
-- "POSSIBLE_DUPLICATE"
-- "REGO_MISMATCH"
-- "CONFLICT"
-- "MISSING_DETAILS"
-- "NOT_SUPPORTED"
-- "LOW_CONFIDENCE"
-- "INFERRED_FACT"
-- "AMBIGUOUS"
-
-Rules:
-- Do NOT invent new actions or fix anything — this is a read-only audit.
-- Keep lines short and scannable (one sentence each).
+IMPORTANT: Do not modify actions — this is a READ-ONLY audit.
 `;
 
 // ---------- Public API ----------
-async function audit({ messages = [], actions = [] }) {
-  // If disabled, return pass-through "no-op" audit.
-  if (!QA_AI) {
-    return {
-      summary: "QA disabled.",
-      lines: ["QA disabled (QA_AI=0)."],
-      flags: [],
-    };
-  }
+async function runAudit({ batch = [], refined = [], actions = [] }) {
+  // Provide the auditor with both raw batch (as seen by the pipeline) and refined lines.
+  // The auditor will pick whatever gives best evidence.
+  const sourceMessages = [
+    ...(Array.isArray(batch) ? batch : []),
+    ...(Array.isArray(refined) ? refined : []),
+  ].map((m) => ({ speaker: m.speaker || "Unknown", text: m.text || "" }));
 
-  const { msgLines, actionLines } = packInputs({ messages, actions });
   const user = [
-    "MESSAGES",
-    ...msgLines.map((x) => `- ${x}`),
+    "MESSAGES (1-based):",
+    fmtMsgs(sourceMessages),
     "",
-    "ACTIONS",
-    ...actionLines.map((x) => `- ${x}`),
+    "ACTIONS (1-based):",
+    fmtActions(actions),
   ].join("\n");
 
-  dbg("\n==== QA AUDIT USER PAYLOAD ====\n" + user + "\n===============================\n");
-
-  const raw = await chatJSON({ system: AUDIT_SYSTEM, user });
+  const raw = await chatJSON({ system: SYSTEM, user });
   const parsed = AuditOut.safeParse(raw);
+  if (parsed.success) return parsed.data;
 
-  if (!parsed.success) {
-    dbg("QA parse failed, raw:", raw);
-    return {
-      summary: "QA parsing failed.",
-      lines: ["Audit result could not be parsed."],
-      flags: [{ code: "NOT_SUPPORTED", severity: "warn", message: "Audit result invalid JSON", actionIndexes: [] }],
-    };
-  }
-
-  return parsed.data;
+  // If the model returned something malformed, degrade gracefully with a neutral audit.
+  const fallback = {
+    summary: {
+      total: actions.length,
+      correct: 0,
+      partial: 0,
+      incorrect: 0,
+      unsure: actions.length,
+    },
+    items: actions.map((_, i) => ({
+      actionIndex: i,
+      verdict: "UNSURE",
+      reason: "Audit response could not be parsed",
+      evidenceText: "",
+    })),
+  };
+  return fallback;
 }
 
-module.exports = { audit };
+module.exports = { runAudit };

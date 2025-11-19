@@ -14,11 +14,10 @@ function newContext({ chatId }) {
   const ctx = {
     id,
     chatId,
-    sections: [],
-    promptOutputs: [],
-    actions: [],
-    audit: null,
-    rawMessages: [], // for initial message block
+    sections: [],       // generic sections (MESSAGES, FILTER, REFINE, CATEGORIZE, etc.)
+    promptOutputs: [],  // per-prompt logs (EXTRACT_* etc.)
+    actions: [],        // final gated actions
+    audit: null,        // AI audit result
   };
 
   _store.set(id, ctx);
@@ -38,8 +37,8 @@ function section(ctx, title, lines = []) {
   if (!s) return;
 
   s.sections.push({
-    title,
-    lines: Array.isArray(lines) ? lines : [String(lines || "")],
+    title: String(title || ""),
+    lines: Array.isArray(lines) ? lines.map(String) : [String(lines || "")],
   });
 }
 
@@ -48,9 +47,9 @@ function prompt(ctx, name, { inputText = "", outputText = "" } = {}) {
   if (!s) return;
 
   s.promptOutputs.push({
-    name,
-    input: inputText,
-    output: outputText,
+    name: String(name || ""),
+    input: inputText || "",
+    output: outputText || "",
   });
 }
 
@@ -60,91 +59,163 @@ function prompt(ctx, name, { inputText = "", outputText = "" } = {}) {
 function actions(ctx, acts = []) {
   const s = get(ctx);
   if (!s) return;
-  s.actions = acts;
+  s.actions = Array.isArray(acts) ? acts : [];
 }
 
 function recordAudit(ctx, auditObj) {
   const s = get(ctx);
   if (!s) return;
-  s.audit = auditObj;
-}
-
-function setRawMessages(ctx, msgs = []) {
-  const s = get(ctx);
-  if (!s) return;
-  s.rawMessages = msgs;
+  s.audit = auditObj || null;
 }
 
 /* ────────────────────────────────────────────
-   LOG PRINTER — EXACT OPTION 1 FORMAT
+   PRINTER — EXACT 0️⃣–4️⃣ STYLE
 ──────────────────────────────────────────── */
 function print(ctx) {
   const s = get(ctx);
   if (!s) return;
 
-  /* ===== INITIAL MESSAGE ===== */
-  console.log("INITIAL MESSAGE");
-  for (const m of s.rawMessages) {
-    console.log(`message text: ${m.text}`);
+  // Bucket sections by type
+  const photoLines = [];
+  const filterLines = [];
+  const refineLines = [];
+  const categorizeLines = [];
+
+  for (const blk of s.sections) {
+    const title = (blk.title || "").toUpperCase();
+
+    if (title.startsWith("PHOTO_MERGER")) {
+      photoLines.push(...blk.lines);
+    } else if (title === "FILTER" || title.startsWith("FILTER ")) {
+      filterLines.push(...blk.lines);
+    } else if (title === "REFINE" || title.startsWith("REFINE ")) {
+      refineLines.push(...blk.lines);
+    } else if (
+      title === "CATEGORIZE" ||
+      (title.startsWith("CATEGORIZE") && !title.includes("JSON"))
+    ) {
+      categorizeLines.push(...blk.lines);
+    }
   }
 
-  /* ===== PROMPT OUTPUTS ===== */
-  for (const p of s.promptOutputs) {
-    console.log("\n~~~~~~~~~~~~");
-    console.log(`PROMPT: ${p.name}`);
-    console.log("~~~~~~~~~~~~");
-    console.log("INPUT:");
-    console.log(p.input);
-    console.log("\nOUTPUT:");
-    console.log(p.output);
+  /* 0️⃣ PHOTO_MERGER */
+  if (photoLines.length) {
+    console.log("0️⃣ PHOTO_MERGER\n");
+    console.log("Output:\n");
+    for (const line of photoLines) {
+      console.log(line);
+    }
+    console.log("");
   }
 
-  /* ===== FINAL OUTPUT ACTIONS ===== */
-  console.log("\nOUTPUT");
-  for (const a of s.actions) {
-    const src = `${a._sourceSpeaker || ""}: '${a._sourceText || ""}'`;
-
-    const car =
-      [a.rego, [a.make, a.model].filter(Boolean).join(" ")]
-        .filter(Boolean)
-        .join(" • ") || "no-rego";
-
-    let detail = "";
-    if (a.type === "REPAIR" && a.checklistItem)
-      detail = `, task: ${a.checklistItem}`;
-    else if (a.type === "READY" && a.readiness)
-      detail = `, readiness: ${a.readiness}`;
-    else if (a.type === "RECON_APPOINTMENT")
-      detail = `, category: ${a.category}`;
-
-    console.log(`- ${a.type} — ${src} {${car}${detail}}`);
+  /* 1️⃣ FILTER */
+  if (filterLines.length) {
+    console.log("1️⃣ FILTER\n");
+    console.log("Output:\n");
+    for (const line of filterLines) {
+      console.log(line);
+    }
+    console.log("");
   }
 
-  /* ===== AUDIT ===== */
+  /* 2️⃣ REFINE */
+  if (refineLines.length) {
+    console.log("2️⃣ REFINE\n");
+    console.log("Output:\n");
+    for (const line of refineLines) {
+      console.log(line);
+    }
+    console.log("");
+  }
+
+  /* 3️⃣ CATEGORIZE */
+  if (categorizeLines.length) {
+    console.log("3️⃣ CATEGORIZE\n");
+    console.log("Output:\n");
+    for (const line of categorizeLines) {
+      console.log(line);
+    }
+    console.log("");
+  }
+
+  /* 4️⃣ EXTRACTORS (only EXTRACT_* prompts) */
+  const extractorPrompts = s.promptOutputs.filter((p) =>
+    String(p.name || "").toUpperCase().startsWith("EXTRACT_")
+  );
+
+  if (extractorPrompts.length) {
+    console.log("4️⃣ EXTRACTORS");
+    for (const p of extractorPrompts) {
+      console.log(p.name);
+      // output should already be minified JSON per your prompts
+      console.log(p.output);
+      console.log(""); // blank line between extractors
+    }
+  }
+
+  /* ===== FINAL OUTPUT & ACTIONS ===== */
+  if (s.actions && s.actions.length) {
+    console.log("OUTPUT");
+    for (const a of s.actions) {
+      const src = `${a._sourceSpeaker || ""}: '${a._sourceText || ""}'`;
+
+      const car =
+        [a.rego, [a.make, a.model].filter(Boolean).join(" ")]
+          .filter(Boolean)
+          .join(" • ") || "no-rego";
+
+      let detail = "";
+      if (a.type === "REPAIR" && a.checklistItem)
+        detail = `, task: ${a.checklistItem}`;
+      else if (a.type === "READY" && a.readiness)
+        detail = `, readiness: ${a.readiness}`;
+      else if (a.type === "RECON_APPOINTMENT" && a.category)
+        detail = `, category: ${a.category}`;
+
+      console.log(`- ${a.type} — ${src} {${car}${detail}}`);
+    }
+  }
+
+  /* ===== ANALYSIS OF EACH LINE (AUDIT) ===== */
   console.log("\nANALYSIS OF EACH LINE");
 
-  if (!s.audit || !s.audit.items) return;
+  if (s.audit && Array.isArray(s.audit.items)) {
+    for (const it of s.audit.items) {
+      const act = s.actions[it.actionIndex];
+      if (!act) continue;
 
-  for (const it of s.audit.items) {
-    const act = s.actions[it.actionIndex];
-    if (!act) continue;
+      const car =
+        [act.rego, [act.make, act.model].filter(Boolean).join(" ")]
+          .filter(Boolean)
+          .join(" • ") || "no-rego";
 
-    const label = `${act.type}${
-      act.checklistItem ? " (" + act.checklistItem + ")" : ""
-    }${act.category ? " (" + act.category + ")" : ""}`;
+      let detail = "";
+      if (act.type === "REPAIR" && act.checklistItem)
+        detail = `, task: ${act.checklistItem}`;
+      else if (act.type === "READY" && act.readiness)
+        detail = `, readiness: ${act.readiness}`;
+      else if (act.type === "RECON_APPOINTMENT" && act.category)
+        detail = `, category: ${act.category}`;
 
-    console.log(
-      `- ${label}: ${it.verdict} — reason: ${it.reason}` +
-        (it.evidenceText ? ` — evidence: "${it.evidenceText}"` : "")
-    );
+      const src = `${act._sourceSpeaker || ""}: '${act._sourceText || ""}'`;
+      const base = `${act.type} — ${src} {${car}${detail}}`;
+
+      const reasonPart = it.reason ? ` — reason: ${it.reason}` : "";
+      const evidencePart = it.evidenceText
+        ? ` — evidence: "${it.evidenceText}"`
+        : "";
+
+      console.log(
+        `- ${base}: ${it.verdict}${reasonPart}${evidencePart}`
+      );
+    }
   }
 
   _store.delete(s.id);
 }
 
 /* ────────────────────────────────────────────
-   LEGACY REQUIRED SHIMS (telegram.js depends on these)
-   — They do nothing but prevent crashes.
+   LEGACY SHIMS (no-ops to keep old code happy)
 ──────────────────────────────────────────── */
 function recordPrompt() {}
 function identSuccess() {}
@@ -170,9 +241,8 @@ module.exports = {
   actions,
   recordAudit,
   print,
-  setRawMessages,
 
-  // legacy exports — MUST exist for compatibility
+  // legacy exports required by older code (no-ops)
   recordPrompt,
   identSuccess,
   identFail,

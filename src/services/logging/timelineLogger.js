@@ -18,7 +18,7 @@ function newContext({ chatId }) {
     promptOutputs: [],
     actions: [],
     audit: null,
-    rawMessages: [], // initial messages for audit formatting
+    rawMessages: [], // for initial message block
   };
 
   _store.set(id, ctx);
@@ -76,13 +76,13 @@ function setRawMessages(ctx, msgs = []) {
 }
 
 /* ────────────────────────────────────────────
-   PRINTER — OPTION 1 FORMAT
+   LOG PRINTER — EXACT OPTION 1 FORMAT
 ──────────────────────────────────────────── */
 function print(ctx) {
   const s = get(ctx);
   if (!s) return;
 
-  /* ===== INITIAL MESSAGES ===== */
+  /* ===== INITIAL MESSAGE ===== */
   console.log("INITIAL MESSAGE");
   for (const m of s.rawMessages) {
     console.log(`message text: ${m.text}`);
@@ -99,13 +99,15 @@ function print(ctx) {
     console.log(p.output);
   }
 
-  /* ===== FINAL ACTIONS ===== */
+  /* ===== FINAL OUTPUT ACTIONS ===== */
   console.log("\nOUTPUT");
   for (const a of s.actions) {
     const src = `${a._sourceSpeaker || ""}: '${a._sourceText || ""}'`;
+
     const car =
-      [a.rego, [a.make, a.model].filter(Boolean).join(" ")].filter(Boolean).join(" • ") ||
-      "no-rego";
+      [a.rego, [a.make, a.model].filter(Boolean).join(" ")]
+        .filter(Boolean)
+        .join(" • ") || "no-rego";
 
     let detail = "";
     if (a.type === "REPAIR" && a.checklistItem)
@@ -115,9 +117,7 @@ function print(ctx) {
     else if (a.type === "RECON_APPOINTMENT")
       detail = `, category: ${a.category}`;
 
-    console.log(
-      `- ${a.type} — ${src} {${car}${detail}}`
-    );
+    console.log(`- ${a.type} — ${src} {${car}${detail}}`);
   }
 
   /* ===== AUDIT ===== */
@@ -142,8 +142,25 @@ function print(ctx) {
   _store.delete(s.id);
 }
 
-/* ──────────────────────────────────────────── */
+/* ────────────────────────────────────────────
+   LEGACY REQUIRED SHIMS (telegram.js depends on these)
+   — They do nothing but prevent crashes.
+──────────────────────────────────────────── */
+function recordPrompt() {}
+function identSuccess() {}
+function identFail() {}
+function change() {}
+function repair() {}
+function ready() {}
+function dropOff() {}
+function customerAppointment() {}
+function reconAppointment() {}
+function nextLocation() {}
+function task() {}
+function sold() {}
+function locationUpdate() {}
 
+/* ──────────────────────────────────────────── */
 module.exports = {
   newContext,
 
@@ -153,14 +170,13 @@ module.exports = {
   actions,
   recordAudit,
   print,
+  setRawMessages,
 
-  // aliases / legacy shims (required by telegram.js)
+  // legacy exports — MUST exist for compatibility
   recordPrompt,
   identSuccess,
   identFail,
   change,
-
-  // extractor helpers
   repair,
   ready,
   dropOff,
@@ -171,4 +187,3 @@ module.exports = {
   sold,
   locationUpdate,
 };
-

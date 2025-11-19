@@ -146,10 +146,29 @@ function print(ctx) {
 
 module.exports = {
   newContext,
+
+  // modern API
   section,
   prompt,
   actions,
   recordAudit,
   print,
-  setRawMessages,
+
+  // aliases / legacy shims (required by telegram.js)
+  recordPrompt,
+  identSuccess,
+  identFail,
+  change,
+
+  // extractor helpers
+  repair,
+  ready,
+  dropOff,
+  customerAppointment,
+  reconAppointment,
+  nextLocation,
+  task,
+  sold,
+  locationUpdate,
 };
+

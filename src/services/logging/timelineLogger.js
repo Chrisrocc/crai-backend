@@ -14,8 +14,8 @@ function newContext({ chatId }) {
   const ctx = {
     id,
     chatId,
-    sections: [],       // generic sections (MESSAGES, FILTER, REFINE, CATEGORIZE, etc.)
-    promptOutputs: [],  // per-prompt logs (EXTRACT_* etc.)
+    sections: [],       // MESSAGES, FILTER, REFINE, CATEGORIZE, etc.
+    promptOutputs: [],  // EXTRACT_* prompts etc.
     actions: [],        // final gated actions
     audit: null,        // AI audit result
   };
@@ -69,13 +69,13 @@ function recordAudit(ctx, auditObj) {
 }
 
 /* ────────────────────────────────────────────
-   PRINTER — EXACT 0️⃣–4️⃣ STYLE (NO VERTICAL JSON)
+   PRINTER — EXACT 0️⃣–4️⃣ STYLE, NO VERTICAL JSON
 ──────────────────────────────────────────── */
 function print(ctx) {
   const s = get(ctx);
   if (!s) return;
 
-  // Buckets
+  // Buckets for the 0–3 steps
   const photoLines = [];
   const filterLines = [];
   const refineLines = [];
@@ -84,7 +84,7 @@ function print(ctx) {
   for (const blk of s.sections) {
     const titleRaw = blk.title || "";
     const title = titleRaw.toUpperCase();
-    const isJSON = title.includes("JSON"); // <-- IGNORE ALL *JSON SECTIONS*
+    const isJSON = title.includes("JSON"); // ignore all *JSON sections
 
     if (isJSON) continue;
 
@@ -94,10 +94,7 @@ function print(ctx) {
       filterLines.push(...blk.lines);
     } else if (title === "REFINE" || title.startsWith("REFINE ")) {
       refineLines.push(...blk.lines);
-    } else if (
-      title === "CATEGORIZE" ||
-      (title.startsWith("CATEGORIZE ") && !title.includes("JSON"))
-    ) {
+    } else if (title === "CATEGORIZE" || title.startsWith("CATEGORIZE ")) {
       categorizeLines.push(...blk.lines);
     }
   }
@@ -134,7 +131,7 @@ function print(ctx) {
     console.log("");
   }
 
-  /* 4️⃣ EXTRACTORS (only EXTRACT_* prompts, JSON kept but single-line/minified) */
+  /* 4️⃣ EXTRACTORS — flatten {actions:[...]} into one-line actions */
   const extractorPrompts = s.promptOutputs.filter((p) =>
     String(p.name || "").toUpperCase().startsWith("EXTRACT_")
   );
@@ -143,7 +140,28 @@ function print(ctx) {
     console.log("4️⃣ EXTRACTORS");
     for (const p of extractorPrompts) {
       console.log(p.name);
-      console.log(p.output);
+
+      let printedAny = false;
+
+      try {
+        const parsed = JSON.parse(p.output);
+        if (parsed && Array.isArray(parsed.actions)) {
+          for (const act of parsed.actions) {
+            // single-line minified JSON per action
+            console.log(JSON.stringify(act));
+            printedAny = true;
+          }
+        }
+      } catch (e) {
+        // fall back to raw output below
+      }
+
+      if (!printedAny && p.output) {
+        // If parsing failed, at least print the output once
+        const oneLine = String(p.output).replace(/\s+/g, " ").trim();
+        console.log(oneLine);
+      }
+
       console.log(""); // blank line between extractors
     }
   }

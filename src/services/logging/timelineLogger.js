@@ -14,10 +14,10 @@ function newContext({ chatId }) {
   const ctx = {
     id,
     chatId,
-    sections: [],       // MESSAGES, FILTER, REFINE, CATEGORIZE, etc.
-    promptOutputs: [],  // EXTRACT_* prompts etc.
-    actions: [],        // final gated actions
-    audit: null,        // AI audit result
+    sections: [],      // MESSAGES, FILTER, REFINE, CATEGORIZE...
+    promptOutputs: [], // EXTRACT_* prompts
+    actions: [],       // final actions
+    audit: null,       // audit object
   };
 
   _store.set(id, ctx);
@@ -49,7 +49,7 @@ function prompt(ctx, name, { inputText = "", outputText = "" } = {}) {
   s.promptOutputs.push({
     name: String(name || ""),
     input: inputText || "",
-    output: outputText || "",
+    output: outputText, // can be string or object
   });
 }
 
@@ -69,32 +69,27 @@ function recordAudit(ctx, auditObj) {
 }
 
 /* ────────────────────────────────────────────
-   PRINTER — EXACT 0️⃣–4️⃣ STYLE, NO VERTICAL JSON
+   PRINTER — EXACT 0️⃣–4️⃣ STYLE
 ──────────────────────────────────────────── */
 function print(ctx) {
   const s = get(ctx);
   if (!s) return;
 
-  // Buckets for the 0–3 steps
   const photoLines = [];
   const filterLines = [];
   const refineLines = [];
   const categorizeLines = [];
 
   for (const blk of s.sections) {
-    const titleRaw = blk.title || "";
-    const title = titleRaw.toUpperCase();
-    const isJSON = title.includes("JSON"); // ignore all *JSON sections
+    const title = (blk.title || "").toUpperCase();
 
-    if (isJSON) continue;
-
-    if (title === "PHOTO_MERGER" || title.startsWith("PHOTO_MERGER ")) {
+    if (title === "PHOTO_MERGER") {
       photoLines.push(...blk.lines);
-    } else if (title === "FILTER" || title.startsWith("FILTER ")) {
+    } else if (title === "FILTER") {
       filterLines.push(...blk.lines);
-    } else if (title === "REFINE" || title.startsWith("REFINE ")) {
+    } else if (title === "REFINE") {
       refineLines.push(...blk.lines);
-    } else if (title === "CATEGORIZE" || title.startsWith("CATEGORIZE ")) {
+    } else if (title === "CATEGORIZE") {
       categorizeLines.push(...blk.lines);
     }
   }
@@ -131,7 +126,7 @@ function print(ctx) {
     console.log("");
   }
 
-  /* 4️⃣ EXTRACTORS — flatten {actions:[...]} into one-line actions */
+  /* 4️⃣ EXTRACTORS (EXTRACT_*) */
   const extractorPrompts = s.promptOutputs.filter((p) =>
     String(p.name || "").toUpperCase().startsWith("EXTRACT_")
   );
@@ -141,37 +136,55 @@ function print(ctx) {
     for (const p of extractorPrompts) {
       console.log(p.name);
 
-      let printedAny = false;
+      let out = p.output;
 
-      try {
-        const parsed = JSON.parse(p.output);
-        if (parsed && Array.isArray(parsed.actions)) {
-          for (const act of parsed.actions) {
-            // single-line minified JSON per action
-            console.log(JSON.stringify(act));
-            printedAny = true;
-          }
+      // handle both JSON strings and plain objects
+      if (typeof out === "string") {
+        try {
+          out = JSON.parse(out);
+        } catch {
+          // not JSON, just print raw
+          console.log(out);
+          console.log("");
+          continue;
         }
-      } catch (e) {
-        // fall back to raw output below
       }
 
-      if (!printedAny && p.output) {
-        // If parsing failed, at least print the output once
-        const oneLine = String(p.output).replace(/\s+/g, " ").trim();
-        console.log(oneLine);
-      }
+      if (out && Array.isArray(out.actions)) {
+        for (const a of out.actions) {
+          const parts = [];
+          parts.push(`type:"${a.type}"`);
+          parts.push(`rego:"${a.rego || ""}"`);
+          parts.push(`make:"${a.make || ""}"`);
+          parts.push(`model:"${a.model || ""}"`);
+          if (a.badge) parts.push(`badge:"${a.badge}"`);
+          if (a.description) parts.push(`description:"${a.description}"`);
+          if (a.year) parts.push(`year:"${a.year}"`);
+          if (a.checklistItem) parts.push(`checklistItem:"${a.checklistItem}"`);
+          if (a.readiness) parts.push(`readiness:"${a.readiness}"`);
+          if (a.category) parts.push(`category:"${a.category}"`);
+          if (a.destination) parts.push(`destination:"${a.destination}"`);
+          if (a.nextLocation) parts.push(`nextLocation:"${a.nextLocation}"`);
+          if (a.dateTime) parts.push(`dateTime:"${a.dateTime}"`);
+          if (a.task) parts.push(`task:"${a.task}"`);
+          if (a.name) parts.push(`name:"${a.name}"`);
+          if (a.service) parts.push(`service:"${a.service}"`);
+          if (a.notes) parts.push(`notes:"${a.notes}"`);
 
+          console.log(`{${parts.join(", ")}}`);
+        }
+      } else {
+        console.log(String(p.output ?? ""));
+      }
       console.log(""); // blank line between extractors
     }
   }
 
-  /* ===== FINAL OUTPUT & ACTIONS ===== */
+  /* FINAL OUTPUT LINES (already match your format) */
   if (s.actions && s.actions.length) {
     console.log("OUTPUT");
     for (const a of s.actions) {
       const src = `${a._sourceSpeaker || ""}: '${a._sourceText || ""}'`;
-
       const car =
         [a.rego, [a.make, a.model].filter(Boolean).join(" ")]
           .filter(Boolean)
@@ -189,7 +202,7 @@ function print(ctx) {
     }
   }
 
-  /* ===== ANALYSIS OF EACH LINE (AUDIT) ===== */
+  /* ANALYSIS OF EACH LINE */
   console.log("\nANALYSIS OF EACH LINE");
 
   if (s.audit && Array.isArray(s.audit.items)) {
@@ -218,9 +231,7 @@ function print(ctx) {
         ? ` — evidence: "${it.evidenceText}"`
         : "";
 
-      console.log(
-        `- ${base}: ${it.verdict}${reasonPart}${evidencePart}`
-      );
+      console.log(`- ${base}: ${it.verdict}${reasonPart}${evidencePart}`);
     }
   }
 
@@ -228,7 +239,7 @@ function print(ctx) {
 }
 
 /* ────────────────────────────────────────────
-   LEGACY SHIMS (no-ops to keep old code happy)
+   LEGACY NO-OP SHIMS
 ──────────────────────────────────────────── */
 function recordPrompt() {}
 function identSuccess() {}
@@ -244,18 +255,14 @@ function task() {}
 function sold() {}
 function locationUpdate() {}
 
-/* ──────────────────────────────────────────── */
 module.exports = {
   newContext,
-
-  // modern API
   section,
   prompt,
   actions,
   recordAudit,
   print,
-
-  // legacy exports required by older code (no-ops)
+  // legacy
   recordPrompt,
   identSuccess,
   identFail,

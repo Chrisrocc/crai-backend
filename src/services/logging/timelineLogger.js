@@ -69,22 +69,26 @@ function recordAudit(ctx, auditObj) {
 }
 
 /* ────────────────────────────────────────────
-   PRINTER — EXACT 0️⃣–4️⃣ STYLE
+   PRINTER — EXACT 0️⃣–4️⃣ STYLE (NO VERTICAL JSON)
 ──────────────────────────────────────────── */
 function print(ctx) {
   const s = get(ctx);
   if (!s) return;
 
-  // Bucket sections by type
+  // Buckets
   const photoLines = [];
   const filterLines = [];
   const refineLines = [];
   const categorizeLines = [];
 
   for (const blk of s.sections) {
-    const title = (blk.title || "").toUpperCase();
+    const titleRaw = blk.title || "";
+    const title = titleRaw.toUpperCase();
+    const isJSON = title.includes("JSON"); // <-- IGNORE ALL *JSON SECTIONS*
 
-    if (title.startsWith("PHOTO_MERGER")) {
+    if (isJSON) continue;
+
+    if (title === "PHOTO_MERGER" || title.startsWith("PHOTO_MERGER ")) {
       photoLines.push(...blk.lines);
     } else if (title === "FILTER" || title.startsWith("FILTER ")) {
       filterLines.push(...blk.lines);
@@ -92,7 +96,7 @@ function print(ctx) {
       refineLines.push(...blk.lines);
     } else if (
       title === "CATEGORIZE" ||
-      (title.startsWith("CATEGORIZE") && !title.includes("JSON"))
+      (title.startsWith("CATEGORIZE ") && !title.includes("JSON"))
     ) {
       categorizeLines.push(...blk.lines);
     }
@@ -102,9 +106,7 @@ function print(ctx) {
   if (photoLines.length) {
     console.log("0️⃣ PHOTO_MERGER\n");
     console.log("Output:\n");
-    for (const line of photoLines) {
-      console.log(line);
-    }
+    for (const line of photoLines) console.log(line);
     console.log("");
   }
 
@@ -112,9 +114,7 @@ function print(ctx) {
   if (filterLines.length) {
     console.log("1️⃣ FILTER\n");
     console.log("Output:\n");
-    for (const line of filterLines) {
-      console.log(line);
-    }
+    for (const line of filterLines) console.log(line);
     console.log("");
   }
 
@@ -122,9 +122,7 @@ function print(ctx) {
   if (refineLines.length) {
     console.log("2️⃣ REFINE\n");
     console.log("Output:\n");
-    for (const line of refineLines) {
-      console.log(line);
-    }
+    for (const line of refineLines) console.log(line);
     console.log("");
   }
 
@@ -132,13 +130,11 @@ function print(ctx) {
   if (categorizeLines.length) {
     console.log("3️⃣ CATEGORIZE\n");
     console.log("Output:\n");
-    for (const line of categorizeLines) {
-      console.log(line);
-    }
+    for (const line of categorizeLines) console.log(line);
     console.log("");
   }
 
-  /* 4️⃣ EXTRACTORS (only EXTRACT_* prompts) */
+  /* 4️⃣ EXTRACTORS (only EXTRACT_* prompts, JSON kept but single-line/minified) */
   const extractorPrompts = s.promptOutputs.filter((p) =>
     String(p.name || "").toUpperCase().startsWith("EXTRACT_")
   );
@@ -147,7 +143,6 @@ function print(ctx) {
     console.log("4️⃣ EXTRACTORS");
     for (const p of extractorPrompts) {
       console.log(p.name);
-      // output should already be minified JSON per your prompts
       console.log(p.output);
       console.log(""); // blank line between extractors
     }

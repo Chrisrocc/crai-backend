@@ -1,3 +1,5 @@
+
+
 // src/routes/cars.js
 const express = require("express");
 const router = express.Router();
@@ -68,7 +70,6 @@ const daysClosed = (start, end) => {
   return Math.max(1, Math.floor(diff / msPerDay));
 };
 
-// compute which checklist items are newly added (after normalization)
 function diffNewChecklistItems(oldList, newList) {
   const norm = (s) => String(s || "").trim().toLowerCase();
   const oldSet = new Set((Array.isArray(oldList) ? oldList : []).map(norm).filter(Boolean));
@@ -89,9 +90,7 @@ router.delete("/:id", async (req, res) => {
     return res.status(204).end();
   } catch (err) {
     console.error("Delete car error:", err);
-    return res
-      .status(400)
-      .json({ message: "Error deleting car", error: err.message });
+    return res.status(400).json({ message: "Error deleting car", error: err.message });
   }
 });
 
@@ -101,9 +100,7 @@ router.get("/", async (_req, res) => {
     const cars = await Car.find().lean();
     res.json({ message: "Cars retrieved successfully", data: cars });
   } catch (err) {
-    res
-      .status(500)
-      .json({ message: "Error retrieving cars", error: err.message });
+    res.status(500).json({ message: "Error retrieving cars", error: err.message });
   }
 });
 
@@ -164,20 +161,16 @@ router.post("/", async (req, res) => {
     doc.checklist = normalizeChecklist(doc.checklist);
     await doc.save();
 
-    res
-      .status(201)
-      .json({ message: "Car created successfully", data: doc.toJSON() });
+    res.status(201).json({ message: "Car created successfully", data: doc.toJSON() });
   } catch (err) {
     if (err.code === 11000 && err.keyPattern && err.keyPattern.rego) {
-      return res
-        .status(409)
-        .json({ message: "A car with this rego already exists." });
+      return res.status(409).json({ message: "A car with this rego already exists." });
     }
-    res
-      .status(400)
-      .json({ message: "Error creating car", error: err.message });
+    res.status(400).json({ message: "Error creating car", error: err.message });
   }
 });
+
+
 
 // ---------- PUT /api/cars/:id ----------
 router.put("/:id", async (req, res) => {
@@ -195,6 +188,7 @@ router.put("/:id", async (req, res) => {
 
     const beforeChecklist = normalizeChecklist(doc.checklist || []);
 
+    // -------------- BASIC FIELDS --------------
     if (body.rego !== undefined) doc.rego = normalizeRego(body.rego || "");
     if (body.make !== undefined) doc.make = String(body.make || "").trim();
     if (body.model !== undefined) doc.model = String(body.model || "").trim();
@@ -213,6 +207,7 @@ router.put("/:id", async (req, res) => {
       doc.checklist = normalizeChecklist(toCsvArray(body.checklist));
     }
 
+    // -------------- NEXT LOCATIONS --------------
     if (Array.isArray(body.nextLocations)) {
       doc.nextLocations = [
         ...new Set(
@@ -231,14 +226,34 @@ router.put("/:id", async (req, res) => {
 
     if (body.readinessStatus !== undefined)
       doc.readinessStatus = String(body.readinessStatus || "").trim();
-    if (body.stage !== undefined) doc.stage = String(body.stage || "").trim();
+
+    // -------------- *** YOUR NEW LOGIC HERE *** --------------
+    //
+    // If car is "Online" AND has >=1 checklist item → change to "In Works/Online"
+    // If car has NO checklist items and user manually puts Online → keep Online
+    //
+    // Applies to BOTH frontend PUT and Autogate sync.
+    //
+    if (body.stage !== undefined) {
+      let incoming = String(body.stage || "").trim();
+      const hasChecklist = doc.checklist && doc.checklist.length > 0;
+
+      if (/^online$/i.test(incoming) && hasChecklist) {
+        incoming = "In Works/Online";
+      }
+
+      doc.stage = incoming;
+    }
+
     if (body.notes !== undefined) doc.notes = String(body.notes || "").trim();
 
+    // -------------- LOCATION + HISTORY --------------
     {
       const incomingLoc =
         body.location !== undefined
           ? String(body.location || "").trim()
           : doc.location || "";
+
       doc.nextLocations = stripCurrentFromNext(
         doc.nextLocations,
         incomingLoc
@@ -294,7 +309,7 @@ router.put("/:id", async (req, res) => {
       );
     }
 
-    // PHOTO ORDER SYNC (if frontend sends photos array)
+    // -------------- PHOTO ORDER SYNC --------------
     if (Array.isArray(body.photos)) {
       doc.photos = body.photos.map((p) => ({
         key: p.key,
@@ -306,12 +321,10 @@ router.put("/:id", async (req, res) => {
     doc.checklist = normalizeChecklist(doc.checklist || []);
     await doc.save();
 
+    // -------------- RECON AUTOGEN LOGIC --------------
     try {
       const afterChecklist = normalizeChecklist(doc.checklist || []);
-      const newlyAdded = diffNewChecklistItems(
-        beforeChecklist,
-        afterChecklist
-      );
+      const newlyAdded = diffNewChecklistItems(beforeChecklist, afterChecklist);
 
       if (newlyAdded.length) {
         const label =
@@ -371,10 +384,7 @@ router.put("/:id", async (req, res) => {
         }
       }
     } catch (e) {
-      console.error(
-        "post-save ingest block failed:",
-        e.stack || e.message
-      );
+      console.error("post-save ingest block failed:", e.stack || e.message);
     }
 
     res.json({ message: "Car updated successfully", data: doc.toJSON() });
@@ -385,159 +395,300 @@ router.put("/:id", async (req, res) => {
         .json({ message: "A car with this rego already exists." });
     }
     console.error("Update car error:", err);
-    res
-      .status(400)
-      .json({ message: "Error updating car", error: err.message });
+    res.status(400).json({ message: "Error updating car", error: err.message });
   }
 });
 
-// ---------- PHOTO PREVIEW ----------
-router.get("/:carId/photo-preview", async (req, res) => {
+
+
+// ---------- DELETE /api/cars/:id ----------
+router.delete("/:id", async (req, res) => {
   try {
-    const car = await Car.findById(req.params.carId);
-    if (!car || !car.photos?.length) return res.json({ data: null });
-    const first = car.photos[0];
-    const key = first.key || first;
-    const signedUrl = await getSignedViewUrl(key, 3600);
-    res.json({ data: signedUrl });
-  } catch (e) {
-    console.error("❌ [PHOTO PREVIEW FAIL]", e);
-    res.status(500).json({ message: e.message });
-  }
-});
+    const id = req.params.id;
+    const doc = await Car.findById(id);
+    if (!doc) return res.status(404).json({ message: "Car not found" });
 
-// -------------- PUBLIC CONTROLLER EXPORT --------------
-const audit = require("../services/logging/auditLogger");
-
-async function resolveRegoController(req, res) {
-  try {
-    const {
-      regoOCR = "",
-      make = "",
-      model = "",
-      color = "",
-      badge = "",
-      year = "",
-      description = "",
-      ocrConfidence = 0.9,
-      apply = true,
-      createIfMissing = false,
-    } = req.body || {};
-
-    const makeT = String(make || "").trim();
-    const modelT = String(model || "").trim();
-    const regoT = normalizeRego(regoOCR || "");
-
-    const actx = audit.newContext({ chatId: req.header("X-Chat-Id") || null });
-    audit.write(actx, "rego.resolve.in", {
-      summary: `ocr:${regoT || "-"} ${makeT} ${modelT} ${color} conf:${ocrConfidence} apply:${apply}`,
-      body: req.body,
-    });
-
-    if (!makeT || !modelT) {
-      audit.write(actx, "rego.resolve.error", { summary: "make+model missing" });
-      return res
-        .status(400)
-        .json({ ok: false, error: "make and model are required" });
-    }
-    if (!regoT || !/^[A-Z0-9]+$/.test(regoT)) {
-      audit.write(actx, "rego.resolve.error", { summary: "invalid regoOCR" });
-      return res
-        .status(400)
-        .json({ ok: false, error: "regoOCR must be alphanumeric" });
+    // Delete associated S3 photos
+    try {
+      const keys = (doc.photos || []).map((p) => p.key).filter(Boolean);
+      if (keys.length) {
+        console.log(`Deleting ${keys.length} photos from S3…`);
+        await deleteFromS3(keys);
+      }
+    } catch (err) {
+      console.error("Photo delete error:", err.message);
     }
 
-    const candidates = await Car.find({
-      make: new RegExp(`^${makeT}$`, "i"),
-      model: new RegExp(`^${modelT}$`, "i"),
-    }).lean();
+    await Car.deleteOne({ _id: id });
 
-    audit.write(actx, "rego.resolve.candidates", {
-      summary: `candidates:${candidates.length}`,
-      regs: candidates.map((c) => c.rego),
-    });
-
-    if (!candidates.length) {
-      audit.write(actx, "rego.resolve.decision", {
-        summary: "reject: no candidates",
-      });
-      return res.json({ ok: true, data: { action: "reject", best: null } });
-    }
-
-    const { weightedEditDistance } =
-      require("../services/matching/regoMatcher");
-    const scored = candidates
-      .map((c) => ({
-        car: c,
-        rego: c.rego,
-        score: weightedEditDistance(regoT, c.rego),
-      }))
-      .sort((a, b) => a.score - b.score);
-
-    const best = scored[0];
-    const second = scored[1];
-    const autoFixThreshold = 0.6;
-    const reviewThreshold = 1.2;
-    const uniqueMargin = 0.2;
-
-    if (best && best.score === 0) {
-      audit.write(actx, "rego.resolve.decision", {
-        summary: `exact ${best.rego}`,
-      });
-      return res.json({
-        ok: true,
-        data: { action: "exact", best: { rego: best.rego } },
-      });
-    }
-
-    if (!best) {
-      audit.write(actx, "rego.resolve.decision", {
-        summary: "reject: no best",
-      });
-      return res.json({ ok: true, data: { action: "reject", best: null } });
-    }
-
-    const secondScore = second ? second.score : Infinity;
-    const unique = secondScore - best.score >= uniqueMargin;
-
-    if (best.score <= autoFixThreshold && unique) {
-      audit.write(actx, "rego.resolve.apply", {
-        summary: `auto-fix ${best.rego} (from ${regoT})`,
-      });
-      return res.json({
-        ok: true,
-        data: {
-          action: "auto-fix",
-          best: { rego: best.rego, id: String(best.car._id) },
-        },
-      });
-    }
-
-    if (best.score <= reviewThreshold) {
-      audit.write(actx, "rego.resolve.decision", {
-        summary: `review ${best.rego}`,
-      });
-      return res.json({
-        ok: true,
-        data: {
-          action: "review",
-          best: { rego: best.rego, id: String(best.car._id) },
-        },
-      });
-    }
-
-    audit.write(actx, "rego.resolve.decision", {
-      summary: "reject: over threshold",
-    });
-    return res.json({ ok: true, data: { action: "reject", best: null } });
+    res.json({ message: "Car deleted successfully" });
   } catch (err) {
-    console.error("resolve-rego error:", err);
-    return res.status(500).json({
-      ok: false,
-      error: err.message || "resolver-failed",
+    console.error("Delete car error:", err);
+    res.status(400).json({ message: "Error deleting car", error: err.message });
+  }
+});
+
+// ---------- GET /api/cars/:id (single car) ----------
+router.get("/:id", async (req, res) => {
+  try {
+    const doc = await Car.findById(req.params.id).lean();
+    if (!doc) return res.status(404).json({ message: "Car not found" });
+
+    // Signed URLs for frontend
+    const photos = await Promise.all(
+      (doc.photos || []).map(async (p) => ({
+        key: p.key,
+        caption: p.caption || "",
+        url: await getSignedViewUrl(p.key),
+      }))
+    );
+
+    doc.photos = photos;
+
+    res.json(doc);
+  } catch (err) {
+    console.error("Fetch car error:", err);
+    res.status(400).json({ message: "Error fetching car", error: err.message });
+  }
+});
+
+// ---------- SEARCH /api/cars/search ----------
+router.get("/search/:query", async (req, res) => {
+  const q = String(req.params.query || "").trim();
+  if (!q) return res.json([]);
+
+  const regex = new RegExp(q.replace(/[^a-zA-Z0-9]/g, ""), "i");
+
+  const docs = await Car.find({
+    $or: [
+      { rego: regex },
+      { make: new RegExp(q, "i") },
+      { model: new RegExp(q, "i") },
+      { description: new RegExp(q, "i") },
+    ],
+  })
+    .limit(20)
+    .lean();
+
+  // add signed URLs
+  for (const car of docs) {
+    car.photos = await Promise.all(
+      (car.photos || []).map(async (p) => ({
+        key: p.key,
+        caption: p.caption || "",
+        url: await getSignedViewUrl(p.key),
+      }))
+    );
+  }
+
+  res.json(docs);
+});
+
+// ---------- PATCH: update stage only ----------
+router.patch("/:id/stage", async (req, res) => {
+  try {
+    const { stage } = req.body;
+    if (!stage) return res.status(400).json({ message: "stage required" });
+
+    const doc = await Car.findById(req.params.id);
+    if (!doc) return res.status(404).json({ message: "Car not found" });
+
+    let finalStage = String(stage).trim();
+    const hasChecklist = doc.checklist && doc.checklist.length > 0;
+
+    if (/^online$/i.test(finalStage) && hasChecklist) {
+      finalStage = "In Works/Online";
+    }
+
+    doc.stage = finalStage;
+    await doc.save();
+
+    res.json({ message: "Stage updated", stage: doc.stage });
+  } catch (err) {
+    console.error("Stage patch error:", err);
+    res.status(400).json({ message: "Error updating stage", error: err.message });
+  }
+});
+
+// ---------- PATCH: update location only ----------
+router.patch("/:id/location", async (req, res) => {
+  try {
+    const { location } = req.body;
+    const doc = await Car.findById(req.params.id);
+
+    if (!doc) return res.status(404).json({ message: "Car not found" });
+
+    const newLoc = String(location || "").trim();
+    const prevLoc = doc.location || "";
+
+    if (newLoc !== prevLoc) {
+      if (Array.isArray(doc.history) && doc.history.length) {
+        const last = doc.history[doc.history.length - 1];
+        if (last && !last.endDate) {
+          last.endDate = new Date();
+          last.days = daysClosed(last.startDate, last.endDate);
+        }
+      } else {
+        doc.history = [];
+      }
+
+      if (newLoc) {
+        doc.history.push({
+          location: newLoc,
+          startDate: new Date(),
+          endDate: null,
+          days: 0,
+        });
+      }
+
+      doc.location = newLoc;
+      doc.nextLocations = stripCurrentFromNext(
+        doc.nextLocations,
+        doc.location
+      );
+    }
+
+    await doc.save();
+
+    res.json({ message: "Location updated", location: doc.location });
+  } catch (err) {
+    console.error("Location patch error:", err);
+    res.status(400).json({
+      message: "Error updating location",
+      error: err.message,
     });
   }
-}
+});
 
+
+// ---------- PATCH: Update Next Locations ----------
+router.patch("/:id/next", async (req, res) => {
+  try {
+    const { nextLocations } = req.body;
+
+    const doc = await Car.findById(req.params.id);
+    if (!doc) return res.status(404).json({ message: "Car not found" });
+
+    // clean array
+    const cleaned = (nextLocations || [])
+      .map((s) => String(s || "").trim())
+      .filter(Boolean);
+
+    doc.nextLocations = stripCurrentFromNext(cleaned, doc.location);
+
+    await doc.save();
+
+    res.json({
+      message: "Next locations updated",
+      nextLocations: doc.nextLocations,
+    });
+  } catch (err) {
+    console.error("Next locations patch error:", err);
+    res.status(400).json({
+      message: "Error updating next locations",
+      error: err.message,
+    });
+  }
+});
+
+// ---------- PATCH: Update Checklist & Auto-Recon ----------
+router.patch("/:id/checklist", async (req, res) => {
+  try {
+    let { checklist } = req.body;
+
+    if (!Array.isArray(checklist)) checklist = [];
+
+    const doc = await Car.findById(req.params.id);
+    if (!doc) return res.status(404).json({ message: "Car not found" });
+
+    // Normalise checklist text
+    checklist = checklist.map((s) => String(s || "").trim()).filter(Boolean);
+
+    doc.checklist = checklist;
+
+    // Re-run recon inference
+    let reconCreated = [];
+    let categorized = [];
+
+    try {
+      const norm = normalizeChecklist(checklist);
+      categorized = await decideCategoryForChecklist(
+        doc.make,
+        doc.model,
+        norm
+      );
+
+      for (const c of categorized) {
+        const result = await upsertReconFromChecklist(doc, c);
+        if (result?.created) reconCreated.push(result.created);
+      }
+    } catch (err) {
+      console.error("AI recon generation error:", err);
+    }
+
+    // Auto stage bump
+    if (doc.stage === "Online" && checklist.length > 0) {
+      doc.stage = "In Works/Online";
+    }
+
+    await doc.save();
+
+    res.json({
+      message: "Checklist updated",
+      checklist: doc.checklist,
+      recon: categorized,
+      reconCreated,
+      stage: doc.stage,
+    });
+  } catch (err) {
+    console.error("Checklist patch error:", err);
+    res.status(400).json({
+      message: "Error updating checklist",
+      error: err.message,
+    });
+  }
+});
+
+// ---------- PATCH: Update photos order + captions ----------
+router.patch("/:id/photos", async (req, res) => {
+  try {
+    const id = req.params.id;
+    let { photos } = req.body;
+
+    if (!Array.isArray(photos)) photos = [];
+
+    const doc = await Car.findById(id);
+    if (!doc) return res.status(404).json({ message: "Car not found" });
+
+    // Ensure correct structure
+    const cleaned = photos.map((p) => ({
+      key: String(p.key || "").trim(),
+      caption: String(p.caption || "").trim(),
+    }));
+
+    doc.photos = cleaned;
+
+    await doc.save();
+
+    res.json({ message: "Photos updated", photos: doc.photos });
+  } catch (err) {
+    console.error("Photos patch error:", err);
+    res.status(400).json({
+      message: "Error updating photos",
+      error: err.message,
+    });
+  }
+});
+
+// ----------------------------------------------------
+// FINAL EXPORT
+// ----------------------------------------------------
 module.exports = router;
-module.exports.resolveRegoController = resolveRegoController;
+
+
+
+
+
+
+
+

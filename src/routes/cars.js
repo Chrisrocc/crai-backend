@@ -1,5 +1,3 @@
-
-
 // src/routes/cars.js
 const express = require("express");
 const router = express.Router();
@@ -428,6 +426,31 @@ router.delete("/:id", async (req, res) => {
   }
 });
 
+// ---------- GET /api/cars/:id/photo-preview ----------
+router.get("/:id/photo-preview", async (req, res) => {
+  try {
+    const doc = await Car.findById(req.params.id).lean();
+    if (!doc) {
+      return res.status(404).json({ message: "Car not found" });
+    }
+
+    const first = (doc.photos || [])[0];
+
+    // If no photos, return empty data but 200 so frontend just shows empty thumb
+    if (!first || !first.key) {
+      return res.json({ data: "" });
+    }
+
+    const url = await getSignedViewUrl(first.key, 3600);
+    return res.json({ data: url });
+  } catch (err) {
+    console.error("Photo preview error:", err);
+    return res
+      .status(500)
+      .json({ message: "Error generating photo preview", error: err.message });
+  }
+});
+
 // ---------- GET /api/cars/:id (single car) ----------
 router.get("/:id", async (req, res) => {
   try {
@@ -474,6 +497,7 @@ router.get("/search/:query", async (req, res) => {
   for (const car of docs) {
     car.photos = await Promise.all(
       (car.photos || []).map(async (p) => ({
+
         key: p.key,
         caption: p.caption || "",
         url: await getSignedViewUrl(p.key),
@@ -684,11 +708,3 @@ router.patch("/:id/photos", async (req, res) => {
 // FINAL EXPORT
 // ----------------------------------------------------
 module.exports = router;
-
-
-
-
-
-
-
-

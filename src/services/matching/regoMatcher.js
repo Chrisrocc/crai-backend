@@ -1,4 +1,3 @@
-// src/services/matching/regoMatcher.js
 const Car = require('../../models/Car');
 
 /** Normalize helpers */
@@ -69,12 +68,13 @@ function weightedEditDistance(aRaw, bRaw) {
 
 /**
  * Decision policy
- * - autoFixThreshold: <= 0.6 and unique → auto-fix
- * - reviewThreshold:  <= 1.2 → human review
+ * - autoFixThreshold: <= 1.2 and unique → auto-fix
+ *   (more aggressive: e.g. 1-char difference like 1AT80G vs 1AT8QG)
+ * - reviewThreshold:  <= 2.0 → human review
  */
 const DEFAULT_POLICY = {
-  autoFixThreshold: 0.6,
-  reviewThreshold: 1.2,
+  autoFixThreshold: 1.2,  // was 0.6 → now allows score 1.0 auto-fix
+  reviewThreshold: 2.0,
   minConfidenceForAuto: 0.8, // OCR confidence gate (optional)
   uniqueMargin: 0.2,         // best must beat 2nd by this margin
   disallowIfSold: true,
@@ -130,7 +130,11 @@ async function matchRego({
   }));
 
   scored.sort((a, b) => a.score - b.score);
-  result.scores = scored.map(s => ({ rego: s.plate, score: Number(s.score.toFixed(3)), id: String(s.car._id) }));
+  result.scores = scored.map((s) => ({
+    rego: s.plate,
+    score: Number(s.score.toFixed(3)),
+    id: String(s.car._id),
+  }));
   result.best = scored[0] || null;
   result.second = scored[1] || null;
 
@@ -155,7 +159,8 @@ async function matchRego({
   const bestScore = result.best.score;
   const secondScore = result.second ? result.second.score : Infinity;
   const unique = (secondScore - bestScore) >= policy.uniqueMargin;
-  const confOK = (ocrConfidence == null) || (ocrConfidence >= policy.minConfidenceForAuto);
+  const confOK =
+    ocrConfidence == null || ocrConfidence >= policy.minConfidenceForAuto;
 
   if (bestScore <= policy.autoFixThreshold && unique && confOK) {
     result.action = 'auto-fix';

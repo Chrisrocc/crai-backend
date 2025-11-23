@@ -15,30 +15,6 @@ Input format
   - So [PHOTO] means that the message was an analysed photo 
 
 All photo messages need to be logically attached to a text message. 
-
-Core behaviour:
-- Your job is to COMBINE the human text with the photo analysis so that each final message clearly describes:
-  - which car it is (make, model, colour, rego, obvious body style),
-  - what is happening (customer viewing, damage, etc),
-  - and ONLY real, useful locations that come from the human text.
-
-Location handling (IMPORTANT):
-- Photo analysis text often says things like "in a carpark", "on the street", "in a driveway", "in a garage", "on grass" etc.
-- These are NOT useful business locations. When you rewrite, you MUST REMOVE these generic environment phrases.
-- Only keep locations that:
-  - come from the human text (e.g. "At Northpoint", "at Haytham's", "at Capital"), OR
-  - are clearly a named place in the text you are merging (e.g. "Northpoint", "Silver Star Motors").
-- Example:
-  - Photo: "[PHOTO] Photo analysis: Mitsubishi Triton white ute with ladder rack, rego 1AT8OG in a car park"
-  - No extra text.
-  - Output: {"speaker":"Christian","text":"[PHOTO] Mitsubishi Triton white ute with ladder rack, rego 1AT8OG"}
-  (drop "in a car park")
-- Example with human location:
-  - Photo: "[PHOTO] Photo analysis: Mitsubishi Triton white ute with ladder rack, rego 1AT8OG in a car park"
-  - Text: "At Northpoint"
-  - Output: {"speaker":"Christian","text":"[PHOTO] Mitsubishi Triton white ute with ladder rack, rego 1AT8OG at Northpoint"}
-  (keep the named place "Northpoint", still drop "in a car park")
-
 For example 
 
 [
@@ -79,7 +55,7 @@ Here are some examples of input and output
 
   {
     "input": [
-      {"speaker": "Christian", "text": "[PHOTO] Photo analysis: oil leak on floor under engine bay in a garage"},
+      {"speaker": "Christian", "text": "[PHOTO] Photo analysis: oil leak on floor under engine bay"},
       {"speaker": "Christian", "text": "under the Amarok AYX900"}
     ],
     "output": {
@@ -103,7 +79,7 @@ Here are some examples of input and output
 
   {
     "input": [
-      {"speaker": "Christian", "text": "[PHOTO] Photo analysis: set of alloy wheels in a car park"},
+      {"speaker": "Christian", "text": "[PHOTO] Photo analysis: set of alloy wheels"},
       {"speaker": "Christian", "text": "fit these to the Hilux"}
     ],
     "output": {
@@ -114,7 +90,6 @@ Here are some examples of input and output
   }
 ]
 `;
-
 
 // =======================
 // Step 1: Filter (expand bullets, attach photos, keep only actionable)
@@ -206,6 +181,11 @@ Style rules (examples condensed):
     "Wash the XR6 and Pajero" → 
     - "Wash XR6"
     - "Wash Pajero"
+
+12) LOCATION CLEANUP RULE:
+- If a [PHOTO] analysis includes a generic location with NO proper noun (e.g., "in a car park", "in driveway", "outside building", "near garage", "on the road"), REMOVE that location description entirely.
+- Only preserve real named places (proper nouns) such as "Northpoint", "Haytham's", "MMM", "Louie", "Capital", "Essendon", etc.
+- If removing the generic location leaves only the car description, keep the car description clean.
 
 If no actionable content remains, return {"messages":[]}.
 `;

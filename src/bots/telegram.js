@@ -79,6 +79,11 @@ async function notifyChatOrAdmin(chatId, text, extra) {
 }
 
 /* ----------------------------------------------------------------
+   Reg plate debug store (photo step → batch summary)
+---------------------------------------------------------------- */
+const lastRegoLogByChat = new Map();
+
+/* ----------------------------------------------------------------
    Batch window (1 minute)
 ---------------------------------------------------------------- */
 const batcher = new Batcher({
@@ -158,6 +163,16 @@ const batcher = new Batcher({
         }
         out.push(`❌ ${a.type} ${a.rego || ''}: ${err.message}`);
       }
+    }
+
+    // 🔍 Attach last rego resolution block (from photo step) into this batch summary
+    const regoLines = lastRegoLogByChat.get(chatId);
+    if (regoLines && regoLines.length) {
+      out.unshift(
+        ...regoLines.map(l => `   ${l}`),
+        '🔍 Rego resolution (last photo):'
+      );
+      lastRegoLogByChat.delete(chatId);
     }
 
     const header = `🧾 Processed ${messages.length} message(s) → ${actions.length} action(s)`;
@@ -265,9 +280,14 @@ bot.on('photo', async (ctx) => {
 
       const car = ensureInfo.car;
       console.log(`✅ Ensured car exists: ${car.rego} (${car.make || ''} ${car.model || ''})`);
+
+      // store for the next batch summary message
+      if (ensureInfo.logLines && ensureInfo.logLines.length) {
+        lastRegoLogByChat.set(ctx.chat.id, ensureInfo.logLines.slice());
+      }
     }
 
-    // 🔧 Fix: construct analysis line correctly for both car & non-car photos
+    // 🔧 construct analysis line correctly for both car & non-car photos
     let analysis = '';
     if (veh.analysis && !veh.make && !veh.model && !veh.rego) {
       analysis = `Photo analysis: ${veh.analysis}`;

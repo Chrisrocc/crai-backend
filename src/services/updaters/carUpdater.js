@@ -58,7 +58,9 @@ async function applyLocationUpdate(a, tctx) {
   car.location = newLoc;
   await car.save();
 
-  if (tctx) timeline.locationUpdate(tctx, `${rego}: ${prev || '-'} → ${newLoc}`);
+  if (tctx && typeof timeline.locationUpdate === 'function') {
+    timeline.locationUpdate(tctx, `${rego}: ${prev || '-'} → ${newLoc}`);
+  }
   return { changed: true, car, previousLocation: prev };
 }
 
@@ -79,7 +81,9 @@ async function applySold(a, tctx) {
   car.stage = 'Sold';
   await car.save();
 
-  if (tctx) timeline.sold(tctx, `${rego}: marked Sold`);
+  if (tctx && typeof timeline.sold === 'function') {
+    timeline.sold(tctx, `${rego}: marked Sold`);
+  }
   return { changed: true, car };
 }
 
@@ -102,7 +106,9 @@ async function addChecklistItem(a, tctx) {
   car.checklist = checklist;
   await car.save();
 
-  if (tctx) timeline.repair(tctx, `${rego}: + ${item}`);
+  if (tctx && typeof timeline.repair === 'function') {
+    timeline.repair(tctx, `${rego}: + ${item}`);
+  }
   return { car, item };
 }
 
@@ -120,7 +126,9 @@ async function setReadinessStatus(a, tctx) {
   car.readinessStatus = readiness;
   await car.save();
 
-  if (tctx) timeline.ready(tctx, `${rego}: readiness → ${readiness}`);
+  if (tctx && typeof timeline.ready === 'function') {
+    timeline.ready(tctx, `${rego}: readiness → ${readiness}`);
+  }
   return { car, readiness };
 }
 
@@ -140,7 +148,9 @@ async function setNextLocation(a, tctx) {
   car.nextLocations = nexts;
   await car.save();
 
-  if (tctx) timeline.nextLocation(tctx, `${rego}: next → ${nextLoc}`);
+  if (tctx && typeof timeline.nextLocation === 'function') {
+    timeline.nextLocation(tctx, `${rego}: next → ${nextLoc}`);
+  }
   return { car, nextLoc };
 }
 
@@ -169,6 +179,7 @@ async function ensureCarForAction(base = {}, tctx = null, opts = {}) {
   if (!rego && !make && !model) {
     const msg = 'Insufficient info: need rego or make+model';
     logLines.push(msg);
+    console.log('🚘 REGO RESOLUTION\n' + logLines.map(l => `- ${l}`).join('\n'));
     throw new Error(msg);
   }
 
@@ -182,6 +193,7 @@ async function ensureCarForAction(base = {}, tctx = null, opts = {}) {
       if (tctx && typeof timeline.ensureCar === 'function') {
         timeline.ensureCar(tctx, line);
       }
+      console.log('🚘 REGO RESOLUTION\n' + logLines.map(l => `- ${l}`).join('\n'));
       if (withLog) return { car, logLines };
       return car;
     }
@@ -241,6 +253,7 @@ async function ensureCarForAction(base = {}, tctx = null, opts = {}) {
       if (tctx && typeof timeline.ensureCar === 'function') {
         timeline.ensureCar(tctx, line);
       }
+      console.log('🚘 REGO RESOLUTION\n' + logLines.map(l => `- ${l}`).join('\n'));
       if (withLog) return { car, logLines };
       return car;
     }
@@ -272,6 +285,8 @@ async function ensureCarForAction(base = {}, tctx = null, opts = {}) {
   if (tctx && typeof timeline.ensureCar === 'function') {
     timeline.ensureCar(tctx, line);
   }
+
+  console.log('🚘 REGO RESOLUTION\n' + logLines.map(l => `- ${l}`).join('\n'));
 
   if (withLog) return { car: newCar, logLines };
   return newCar;

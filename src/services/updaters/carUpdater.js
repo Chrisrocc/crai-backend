@@ -58,7 +58,7 @@ async function applyLocationUpdate(a, tctx) {
   car.location = newLoc;
   await car.save();
 
-  if (tctx) timeline.location(tctx, `${rego}: ${prev || '-'} → ${newLoc}`);
+  if (tctx) timeline.locationUpdate(tctx, `${rego}: ${prev || '-'} → ${newLoc}`);
   return { changed: true, car, previousLocation: prev };
 }
 
@@ -79,7 +79,7 @@ async function applySold(a, tctx) {
   car.stage = 'Sold';
   await car.save();
 
-  if (tctx) timeline.stage(tctx, `${rego}: marked Sold`);
+  if (tctx) timeline.sold(tctx, `${rego}: marked Sold`);
   return { changed: true, car };
 }
 
@@ -145,9 +145,12 @@ async function setNextLocation(a, tctx) {
 }
 
 // ---------------------------------------------------------------------------
-// ENSURE CAR EXISTS (auto-create + fuzzy match)
+// ENSURE CAR EXISTS (auto-create + fuzzy match, with optional log bundle)
 // ---------------------------------------------------------------------------
-async function ensureCarForAction(base = {}, tctx = null) {
+async function ensureCarForAction(base = {}, tctx = null, opts = {}) {
+  const { withLog = false } = opts;
+  const logLines = [];
+
   const rego = (base.rego || '').toUpperCase().replace(/\s+/g, '');
   const make = (base.make || '').trim();
   const model = (base.model || '').trim();
@@ -159,18 +162,35 @@ async function ensureCarForAction(base = {}, tctx = null) {
   const badge = base.badge || '';
   const desc = base.description || '';
 
+  logLines.push(
+    `input → rego:"${rego || '-'}" make:"${make || '-'}" model:"${model || '-'}"`
+  );
+
   if (!rego && !make && !model) {
-    throw new Error('Insufficient info: need rego or make+model');
+    const msg = 'Insufficient info: need rego or make+model';
+    logLines.push(msg);
+    throw new Error(msg);
   }
 
   // 1️⃣ Exact rego match
-  let car = await Car.findOne({ rego: new RegExp(`^${rego}$`, 'i') });
-  if (car) {
-    if (tctx) timeline.ensureCar(tctx, `found existing car ${rego}`);
-    return car;
+  let car = null;
+  if (rego) {
+    car = await Car.findOne({ rego: new RegExp(`^${rego}$`, 'i') });
+    if (car) {
+      const line = `exact match in DB → ${car.rego} (${car.make || ''} ${car.model || ''})`;
+      logLines.push(line);
+      if (tctx && typeof timeline.ensureCar === 'function') {
+        timeline.ensureCar(tctx, line);
+      }
+      if (withLog) return { car, logLines };
+      return car;
+    }
+    logLines.push('no exact rego match in DB');
+  } else {
+    logLines.push('no rego provided, skipping exact-rego lookup');
   }
 
-  // 2️⃣ Fuzzy rego match (using make/model/color)
+  // 2️⃣ Fuzzy rego match (using make/model/color/year)
   const fuzzy = await matchRego({
     ocrRego: rego,
     make,
@@ -180,15 +200,54 @@ async function ensureCarForAction(base = {}, tctx = null) {
     ocrConfidence: 0.9,
   });
 
-  if (fuzzy.action === 'auto-fix' && fuzzy.best?.car?._id) {
-    car = await Car.findById(fuzzy.best.car._id);
-    if (car) {
-      if (tctx) timeline.ensureCar(tctx, `fuzzy matched ${rego} → ${car.rego}`);
-      return car;
+  if (fuzzy) {
+    logLines.push(
+      `fuzzy matcher → action:${fuzzy.action}, reason:${fuzzy.reason || 'n/a'}`
+    );
+
+    if (fuzzy.best) {
+      const best = fuzzy.best;
+      const bestCar = best.car || {};
+      const bestScore =
+        typeof best.score === 'number'
+          ? best.score.toFixed(3)
+          : String(best.score ?? '-');
+      logLines.push(
+        `best candidate: ${best.plate} (${bestCar.make || ''} ${bestCar.model || ''}) score:${bestScore}`
+      );
+    } else {
+      logLines.push('no fuzzy candidate (best=null)');
     }
+
+    if (fuzzy.second) {
+      const second = fuzzy.second;
+      const secondScore =
+        typeof second.score === 'number'
+          ? second.score.toFixed(3)
+          : String(second.score ?? '-');
+      logLines.push(
+        `second best: ${second.plate} score:${secondScore}`
+      );
+    }
+  } else {
+    logLines.push('fuzzy matcher returned null/undefined');
   }
 
-  // 3️⃣ Create new car if none found
+  if (fuzzy && fuzzy.action === 'auto-fix' && fuzzy.best?.car?._id) {
+    car = await Car.findById(fuzzy.best.car._id);
+    if (car) {
+      const line = `using fuzzy match → ${rego} → ${car.rego} (${car.make || ''} ${car.model || ''})`;
+      logLines.push(line);
+      if (tctx && typeof timeline.ensureCar === 'function') {
+        timeline.ensureCar(tctx, line);
+      }
+      if (withLog) return { car, logLines };
+      return car;
+    }
+    logLines.push('fuzzy suggested car, but lookup by _id failed');
+  }
+
+  // 3️⃣ Create new car if none found / fuzzy not strong enough
   const newCar = new Car({
     rego,
     make,
@@ -207,7 +266,14 @@ async function ensureCarForAction(base = {}, tctx = null) {
   });
 
   await newCar.save();
-  if (tctx) timeline.ensureCar(tctx, `created new car ${rego} (${make} ${model})`);
+  const line = `created new car → ${newCar.rego} (${newCar.make || ''} ${newCar.model || ''})`;
+  logLines.push(line);
+
+  if (tctx && typeof timeline.ensureCar === 'function') {
+    timeline.ensureCar(tctx, line);
+  }
+
+  if (withLog) return { car: newCar, logLines };
   return newCar;
 }
 

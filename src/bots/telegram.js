@@ -1,4 +1,3 @@
-// src/bots/telegram.js
 require('dotenv').config();
 const { Telegraf } = require('telegraf');
 
@@ -154,7 +153,9 @@ const batcher = new Batcher({
         }
         out.push(msg);
       } catch (err) {
-        timeline.identFail(tctx, { reason: err.message, rego: a.rego, make: a.make, model: a.model });
+        if (typeof timeline.identFail === 'function') {
+          timeline.identFail(tctx, { reason: err.message, rego: a.rego, make: a.make, model: a.model });
+        }
         out.push(`❌ ${a.type} ${a.rego || ''}: ${err.message}`);
       }
     }
@@ -220,7 +221,7 @@ bot.on('text', async (ctx) => {
 });
 
 /* ----------------------------------------------------------------
-   PHOTO handler — includes car auto-creation logic
+   PHOTO handler — includes car auto-creation logic + rego logging
 ---------------------------------------------------------------- */
 bot.on('photo', async (ctx) => {
   const photos = ctx.message.photo || [];
@@ -229,6 +230,8 @@ bot.on('photo', async (ctx) => {
   const key = ctx.message.message_id;
   addToBatch(ctx, 'Photo', key);
   await safeReply(ctx, '🖼️ Photo received — analyzing…');
+
+  let ensureInfo = null;
 
   try {
     const biggest = photos[photos.length - 1];
@@ -244,18 +247,24 @@ bot.on('photo', async (ctx) => {
 
     const veh = await analyzeImageVehicle({ base64, mimeType });
 
-    // ✅ ensure car exists if detected
+    // ✅ ensure car exists if detected (with detailed rego log)
     if (veh.rego && (veh.make || veh.model)) {
-      await ensureCarForAction({
-        rego: veh.rego,
-        make: veh.make,
-        model: veh.model,
-        badge: veh.badge,
-        color: veh.color,
-        year: veh.year,
-        description: veh.description,
-      });
-      console.log(`✅ Ensured car exists: ${veh.rego} (${veh.make} ${veh.model})`);
+      ensureInfo = await ensureCarForAction(
+        {
+          rego: veh.rego,
+          make: veh.make,
+          model: veh.model,
+          badge: veh.badge,
+          color: veh.color,
+          year: veh.year,
+          description: veh.description,
+        },
+        null,
+        { withLog: true }
+      );
+
+      const car = ensureInfo.car;
+      console.log(`✅ Ensured car exists: ${car.rego} (${car.make || ''} ${car.model || ''})`);
     }
 
     // 🔧 Fix: construct analysis line correctly for both car & non-car photos
@@ -264,7 +273,9 @@ bot.on('photo', async (ctx) => {
       analysis = `Photo analysis: ${veh.analysis}`;
     } else {
       const desc = [veh.make, veh.model, veh.colorDescription].filter(Boolean).join(' ');
-      analysis = `Photo analysis: ${desc}${veh.rego ? `, rego ${veh.rego}` : ''}${veh.analysis ? ` — ${veh.analysis}` : ''}`;
+      analysis = `Photo analysis: ${desc}${veh.rego ? `, rego ${veh.rego}` : ''}${
+        veh.analysis ? ` — ${veh.analysis}` : ''
+      }`;
     }
 
     const ok = batcher.updateMessage(ctx.chat.id, key, analysis);
@@ -275,11 +286,16 @@ bot.on('photo', async (ctx) => {
       addToBatch(ctx, cap, `${key}:caption`, baseTs + 1);
     }
 
+    const regoLog =
+      ensureInfo?.logLines?.length
+        ? `\n\n🔍 Rego resolution:\n${ensureInfo.logLines.join('\n')}`
+        : '';
+
     await safeReply(
       ctx,
       ok
-        ? `✅ Added to batch: ${analysis}${cap ? `\n📝 Caption: ${cap}` : ''}`
-        : `ℹ️ Analysis ready, but batch already flushed.`
+        ? `✅ Added to batch: ${analysis}${cap ? `\n📝 Caption: ${cap}` : ''}${regoLog}`
+        : `ℹ️ Analysis ready, but batch already flushed.${regoLog}`
     );
   } catch (err) {
     console.error('photo handler error:', err);

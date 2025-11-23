@@ -482,15 +482,20 @@ function applyAuditGate(actions, audit) {
   const gated = [];
   actions.forEach((a, idx) => {
     const verdict = verdictByIndex.get(idx);
-    if (verdict === "INCORRECT") {
-      // Hard block explicit hallucinations / contradictions
-      return;
+
+    // ❗ Never block RECON_APPOINTMENT based on the audit.
+    // The audit is too strict ("no appointment mentioned") and we still
+    // want recon rows whenever repairs are extracted.
+    if (verdict === "INCORRECT" && a.type !== "RECON_APPOINTMENT") {
+      return; // drop only non-recon actions marked incorrect
     }
+
     gated.push(a);
   });
 
   return gated;
 }
+
 
 /* ================================
    Public API

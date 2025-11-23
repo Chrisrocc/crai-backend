@@ -32,7 +32,7 @@ const SILENT_ALL_GROUPS = String(process.env.TELEGRAM_SILENT_ALL_GROUPS || 'true
 const SILENT_GROUP_IDS = new Set(
   (process.env.TELEGRAM_SILENT_GROUP_IDS || '')
     .split(',')
-    .map(s => s.trim())
+    .map((s) => s.trim())
     .filter(Boolean)
 );
 const ADMIN_CHAT_ID = process.env.TELEGRAM_ADMIN_CHAT_ID || '';
@@ -79,9 +79,12 @@ async function notifyChatOrAdmin(chatId, text, extra) {
 }
 
 /* ----------------------------------------------------------------
-   Reg plate debug store (photo step → batch summary)
+   Rego debug stores
+   - lastRegoLogByChat: log lines from ensureCarForAction
+   - lastRegoMapByChat: { rawRego -> canonicalRego } per chat
 ---------------------------------------------------------------- */
-const lastRegoLogByChat = new Map();
+const lastRegoLogByChat = new Map(); // chatId -> [lines]
+const lastRegoMapByChat = new Map(); // chatId -> { RAW -> CANONICAL }
 
 /* ----------------------------------------------------------------
    Batch window (1 minute)
@@ -93,6 +96,26 @@ const batcher = new Batcher({
     const { actions } = await processBatch(messages, tctx);
 
     const out = [];
+
+    // 🔁 Step 0: normalize regos based on photo OCR → DB mapping
+    const regoMap = lastRegoMapByChat.get(chatId) || null;
+    const regoNormLines = [];
+
+    if (regoMap) {
+      for (const a of actions) {
+        if (a.rego) {
+          const key = String(a.rego).toUpperCase().replace(/\s+/g, '');
+          const mapped = regoMap[key];
+          if (mapped && mapped !== a.rego) {
+            regoNormLines.push(`🔁 Rego normalized for ${a.type}: ${a.rego} → ${mapped}`);
+            a.rego = mapped;
+          }
+        }
+      }
+      lastRegoMapByChat.delete(chatId);
+    }
+
+    // 4️⃣ Apply actions to DB
     for (const a of actions) {
       try {
         let msg = '';
@@ -127,8 +150,8 @@ const batcher = new Batcher({
           case 'CUSTOMER_APPOINTMENT': {
             const r = await createCustomerAppointment(a, tctx);
             const label = r.car
-              ? (r.car.rego || [r.car.make, r.car.model].filter(Boolean).join(' '))
-              : (r.appointment?.carText || 'unidentified vehicle');
+              ? r.car.rego || [r.car.make, r.car.model].filter(Boolean).join(' ')
+              : r.appointment?.carText || 'unidentified vehicle';
             const when = r.appointment?.dateTime ? ` @ ${r.appointment.dateTime}` : '';
             msg = `👤 Customer appt created for ${label}${when}`;
             break;
@@ -136,8 +159,8 @@ const batcher = new Batcher({
           case 'RECON_APPOINTMENT': {
             const r = await createReconditionerAppointment(a, tctx);
             const label = r.car
-              ? (r.car.rego || `${r.car.make} ${r.car.model}`.trim())
-              : (r.carText || 'unidentified vehicle');
+              ? r.car.rego || `${r.car.make} ${r.car.model}`.trim()
+              : r.carText || 'unidentified vehicle';
             const when = r.appointment?.dateTime ? ` @ ${r.appointment.dateTime}` : '';
             const cat = r.appointment?.category?.name ? ` • ${r.appointment.category.name}` : '';
             msg = `🔧 Recon appt created for ${label}${when} (${r.appointment.name}${cat})`;
@@ -165,18 +188,25 @@ const batcher = new Batcher({
       }
     }
 
-    // 🔍 Attach last rego resolution block (from photo step) into this batch summary
+    // 🔍 Attach last rego resolution block (from photo step)
     const regoLines = lastRegoLogByChat.get(chatId);
+    const header = `🧾 Processed ${messages.length} message(s) → ${actions.length} action(s)`;
+
+    const lines = [header];
+
     if (regoLines && regoLines.length) {
-      out.unshift(
-        ...regoLines.map(l => `   ${l}`),
-        '🔍 Rego resolution (last photo):'
-      );
+      lines.push('🔍 Rego resolution (last photo):');
+      for (const l of regoLines) lines.push(`   ${l}`);
       lastRegoLogByChat.delete(chatId);
     }
 
-    const header = `🧾 Processed ${messages.length} message(s) → ${actions.length} action(s)`;
-    const body = [header, ...(out.length ? out : ['No actionable updates.'])].join('\n');
+    if (regoNormLines.length) {
+      for (const l of regoNormLines) lines.push(l);
+    }
+
+    lines.push(...(out.length ? out : ['No actionable updates.']));
+
+    const body = lines.join('\n');
     await notifyChatOrAdmin(chatId, body);
     timeline.print(tctx);
   },
@@ -281,9 +311,18 @@ bot.on('photo', async (ctx) => {
       const car = ensureInfo.car;
       console.log(`✅ Ensured car exists: ${car.rego} (${car.make || ''} ${car.model || ''})`);
 
-      // store for the next batch summary message
+      // Store log lines for next batch summary
       if (ensureInfo.logLines && ensureInfo.logLines.length) {
         lastRegoLogByChat.set(ctx.chat.id, ensureInfo.logLines.slice());
+      }
+
+      // Store rego mapping: raw (veh.rego) -> canonical (car.rego)
+      const raw = String(veh.rego || '').toUpperCase().replace(/\s+/g, '');
+      const canonical = String(car.rego || '').toUpperCase().replace(/\s+/g, '');
+      if (raw && canonical && raw !== canonical) {
+        const existing = lastRegoMapByChat.get(ctx.chat.id) || {};
+        existing[raw] = canonical;
+        lastRegoMapByChat.set(ctx.chat.id, existing);
       }
     }
 

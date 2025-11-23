@@ -516,6 +516,7 @@ Return STRICT minified JSON only:
 `;
 
 // ----------------------- RECON_APPOINTMENT (DB-DRIVEN; NO HARDCODED RULES) -----------------------
+// ----------------------- RECON_APPOINTMENT (DB-DRIVEN; WITH NOTES) -----------------------
 function EXTRACT_RECON_APPOINTMENT_FROM_DB(
   ALLOWED_CATEGORY_LIST,
   CATEGORY_KEYWORDS_RULES_MAP,
@@ -563,16 +564,28 @@ Return STRICT minified JSON only:
   {"type":"RECON_APPOINTMENT","rego":"","make":"","model":"","badge":"","description":"","year":"","name":"","service":"","category":"","dateTime":"","notes":""}
 ]}
 
+Notes vs service:
+- "service" is a short label for the type of work or booking (e.g., "mechanical inspection", "panel & paint").
+- "notes" is a short, human-readable description of the *specific job* mentioned in the line
+  (e.g., "Replace engine", "Replace rear bumper", "Fix oil leak and inspect suspension").
+- If the line clearly describes the repair(s), ALWAYS fill "notes" with that description, even if "service" is just a generic label.
+- If the line describes multiple DISTINCT jobs that map to different categories (e.g., engine + rear bumper),
+  output multiple RECON_APPOINTMENT actions:
+    - one for the mechanical category with notes like "Replace engine"
+    - one for the body/panel category with notes like "Replace rear bumper".
+- If no specific job is stated, you may leave "notes":"".
+
 Additional rules:
 - An appointment is implied whenever the text clearly states someone is booked, coming, taking the car to a provider, or similar.
   Examples:
-  - "Jan is coming to fix the Civic airbag light." → category must reflect "Auto Electric" if configured, NOT "Mechanical".
+  - "Jan is coming to fix the Civic airbag light." → category must reflect "Auto Electric" if configured.
   - "Car 3456 needs a new bumper, booked with Imad." → Body / panel category.
 - Output 1+ actions PER INPUT LINE (never silently drop a line).
 - Strings only. Unknown → "".
 - Keep keys in EXACT order as shown above.
 `;
 }
+
 
 // ----------------------- NEXT_LOCATION -----------------------
 const EXTRACT_NEXT_LOCATION = `

@@ -3,7 +3,6 @@ require('dotenv').config();
 const path = require('path');
 const Car = require('../../models/Car');
 const audit = require('../logging/auditLogger');
-const { geminiGenerate } = require('./llmClient'); // kept for future use if needed
 
 let getSignedViewUrl;
 try {
@@ -15,6 +14,7 @@ try {
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || '';
 const MODEL_NAME = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const MAX_BYTES = 8 * 1024 * 1024;
+const CONF_THRESHOLD = 0.9; // only keep very confident items
 
 /* -------------------------------------------------------------------------- */
 /* utils                                                                      */
@@ -38,70 +38,26 @@ function stripFencesToJson(text) {
 const lc = (s) => String(s || '').toLowerCase().trim();
 
 /* -------------------------------------------------------------------------- */
-/* Canonical damage mapping                                                   */
-/* -------------------------------------------------------------------------- */
-
-const CANON_DAMAGES = {
-  dent: ['dent', 'dint', 'ding'],
-  scratch: ['scratch', 'scrape', 'scuff', 'chip', 'stone chip'],
-  crack: ['crack', 'cracked', 'split', 'fracture'],
-  rust: ['rust', 'corrosion'],
-  'paint peel': ['paint peel', 'clear coat', 'clearcoat', 'clear-coat', 'peel'],
-  'hail damage': ['hail', 'hail damage'],
-  burn: ['burn', 'melt', 'heat damage'],
-  'oil leak': ['oil leak'],
-  'fluid leak': [
-    'fluid leak',
-    'coolant leak',
-    'transmission leak',
-    'power steering leak',
-    'ps fluid',
-    'leak',
-  ],
-  'warning light': [
-    'warning light',
-    'check engine',
-    'engine light',
-    'abs light',
-    'srs light',
-  ],
-};
-
-const DAMAGE_LOOKUP = new Map();
-for (const [canon, arr] of Object.entries(CANON_DAMAGES)) {
-  for (const k of arr) DAMAGE_LOOKUP.set(k, canon);
-}
-
-function canonDamage(s) {
-  const t = lc(s);
-  if (!t) return null;
-  if (DAMAGE_LOOKUP.has(t)) return DAMAGE_LOOKUP.get(t);
-  for (const [k, v] of DAMAGE_LOOKUP.entries()) {
-    if (t.includes(k)) return v;
-  }
-  if (CANON_DAMAGES[t]) return t;
-  return t; // fall back to raw text
-}
-
-/* -------------------------------------------------------------------------- */
-/* LLM calls                                                                  */
+/* Gemini call: structured damage items                                       */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Step 1: Image → structured rough items
- *
- * Returns:
+ * Ask Gemini to return structured damage items.
+ * Shape:
  * {
- *   items: [
- *     { zone: "exterior"|"interior", section: "front bumper", damage: "scratch", confidence: 0.96 },
- *     ...
- *   ],
- *   _raw: "<llm raw text>"
+ *   "items": [
+ *     {
+ *       "area": "exterior" | "interior",
+ *       "section": "front bumper",
+ *       "damage": "scratch",
+ *       "confidence": 0.95
+ *     }
+ *   ]
  * }
  */
-async function callGeminiRough({ bytes, mimeType, caption }) {
+async function callGeminiDamageSummary({ bytes, mimeType, caption }) {
   if (!GOOGLE_API_KEY) {
-    return { items: [], _raw: '{"error":"no_api_key"}' };
+    return { items: [], _raw: '{}' };
   }
 
   const url = `https://generativelanguage.googleapis.com/v1/models/${MODEL_NAME}:generateContent?key=${encodeURIComponent(
@@ -110,26 +66,29 @@ async function callGeminiRough({ bytes, mimeType, caption }) {
 
   const prompt = `
 Return ONLY MINIFIED JSON in this exact shape:
-{"items":[{"zone":"exterior","section":"front bumper","damage":"scratch","confidence":0.95}]}
+{"items":[{"area":"exterior","section":"front bumper","damage":"scratch","confidence":0.98}]}
 
 Rules:
-- "items" is an array. Max 40 items.
+- Look for CLEAR, OBVIOUS damage only. If unsure, DO NOT include it.
 - Each item:
-  - "zone": "exterior" or "interior" (lowercase).
-  - "section": short label like "front bumper", "rear bumper", "bonnet", "seats", "door trim", "dashboard".
-  - "damage": very short description like "scratch", "dent", "crack", "tear", "stain".
-  - "confidence": number between 0 and 1 (model's confidence).
-- ONLY include items where you are reasonably sure (do NOT guess).
-- Use "exterior" for body panels, glass, lights, wheels, exterior trims.
-- Use "interior" for seats, dash, steering wheel, carpets, headliner, door trims, infotainment.
-- Do not describe things that are clearly fine.
-- Avoid near-duplicates (same section + same damage type).
+  - "area": "exterior" or "interior".
+  - "section": a short human phrase ("front bumper", "rear window", "steering wheel").
+  - "damage": a short word/phrase ("scratch","dent","crack","tear","paint peel","scuff","chip","wear").
+  - "confidence": number between 0 and 1 (1.0 = absolutely certain).
+- Prefer FEWER, very confident items over many guesses.
+- If you cannot see any damage clearly, return {"items": []}.
+- Max 15 items.
 `.trim();
 
   const parts = [
     { text: prompt },
     { text: caption ? `Caption hint: ${caption}` : 'No caption' },
-    { inlineData: { mimeType, data: Buffer.from(bytes).toString('base64') } },
+    {
+      inlineData: {
+        mimeType,
+        data: Buffer.from(bytes).toString('base64'),
+      },
+    },
   ];
 
   try {
@@ -144,98 +103,18 @@ Rules:
 
     const json = await resp.json();
     const text =
-      json?.candidates?.[0]?.content?.parts?.find((p) => p.text)?.text || '';
-    const obj = stripFencesToJson(text);
-    const rawItems = Array.isArray(obj?.items) ? obj.items : [];
-
-    const items = rawItems
-      .map((r) => ({
-        zone: lc(r.zone || ''),
-        section: String(r.section || '').trim(),
-        damage: String(r.damage || '').trim(),
-        confidence: typeof r.confidence === 'number' ? r.confidence : 0,
-      }))
-      .filter((r) => r.zone && r.section && r.damage);
+      json?.candidates?.[0]?.content?.parts?.find((p) => p.text)?.text ||
+      '';
+    const obj = stripFencesToJson(text) || {};
+    const items = Array.isArray(obj.items) ? obj.items : [];
 
     return { items, _raw: text || JSON.stringify(json).slice(0, 2000) };
   } catch (err) {
     audit.write(caption ? { caption } : {}, 'vision.error', {
       summary: String(err?.message || err),
     });
-    return { items: [], _raw: '{"error":"exception"}' };
+    return { items: [], _raw: '{}' };
   }
-}
-
-/**
- * Step 2: High-confidence compression → 2 lines max
- *
- * Input: items = [{ zone, section, damage, confidence }]
- * Output:
- *   {
- *     description: "",  // reserved for future
- *     checklist: [
- *       "Exterior: front bumper - scratch, rear bumper - dent",
- *       "Interior: seats - tear, door trim - scuff"
- *     ]
- *   }
- */
-function aiRefineChecklist(items = [], caption = '') {
-  const MIN_CONFIDENCE = 0.9; // only keep things we're very sure about
-  const MAX_PER_ZONE = 8; // hard cap per zone to avoid crazy-long lines
-
-  const high = (Array.isArray(items) ? items : []).filter((i) => {
-    const c = Number(i.confidence || 0);
-    return c >= MIN_CONFIDENCE && i.zone && i.section && i.damage;
-  });
-
-  if (!high.length) {
-    return { description: '', checklist: [] };
-  }
-
-  const byZone = {
-    Exterior: new Map(), // key -> { section, damage }
-    Interior: new Map(),
-  };
-
-  for (const it of high) {
-    const zone = it.zone.includes('inter') ? 'Interior' : 'Exterior';
-    const section = String(it.section || '').trim();
-    const damage = canonDamage(it.damage) || String(it.damage || '').trim();
-    if (!section || !damage) continue;
-
-    const key = `${section.toLowerCase()}|${damage.toLowerCase()}`;
-    const bucket = byZone[zone];
-    if (!bucket.has(key)) {
-      bucket.set(key, { section, damage });
-    }
-  }
-
-  const lines = [];
-
-  // Exterior
-  if (byZone.Exterior.size) {
-    const parts = Array.from(byZone.Exterior.values())
-      .slice(0, MAX_PER_ZONE)
-      .map((p) => `${p.section} - ${p.damage}`);
-    if (parts.length) {
-      lines.push(`Exterior: ${parts.join(', ')}`);
-    }
-  }
-
-  // Interior
-  if (byZone.Interior.size) {
-    const parts = Array.from(byZone.Interior.values())
-      .slice(0, MAX_PER_ZONE)
-      .map((p) => `${p.section} - ${p.damage}`);
-    if (parts.length) {
-      lines.push(`Interior: ${parts.join(', ')}`);
-    }
-  }
-
-  return {
-    description: '',
-    checklist: lines, // 0, 1, or 2 lines total
-  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -255,7 +134,6 @@ async function analyzeWithGemini(
       damages: [],
     };
   }
-
   if (bytes.length > MAX_BYTES) {
     return {
       inspect: [],
@@ -266,29 +144,67 @@ async function analyzeWithGemini(
     };
   }
 
-  // 1) vision → structured rough items
-  const roughRes = await callGeminiRough({ bytes, mimeType, caption });
-  const items = Array.isArray(roughRes.items) ? roughRes.items : [];
+  // 1) vision → structured damage items
+  const { items, _raw } = await callGeminiDamageSummary({
+    bytes,
+    mimeType,
+    caption,
+  });
 
-  // 2) compress into 2 lines max
-  const refined = aiRefineChecklist(items, caption || '');
-  const inspect = Array.isArray(refined.checklist) ? refined.checklist : [];
+  // 2) keep only high-confidence items
+  const high = (Array.isArray(items) ? items : []).filter((it) => {
+    const c = typeof it.confidence === 'number' ? it.confidence : null;
+    const label = lc(it.confidence);
+    if (c !== null) return c >= CONF_THRESHOLD;
+    if (label === 'high' || label === 'certain') return true;
+    return false;
+  });
+
+  // 3) Build two grouped lines only: Exterior: ..., Interior: ...
+  const extParts = [];
+  const intParts = [];
+
+  for (const it of high) {
+    const area = lc(it.area);
+    const section = String(it.section || '').trim();
+    const damage = String(it.damage || '').trim();
+    if (!section && !damage) continue;
+
+    const frag = section && damage ? `${section} - ${damage}` : section || damage;
+
+    if (area === 'interior') {
+      intParts.push(frag);
+    } else {
+      // default to exterior if not clearly labelled
+      extParts.push(frag);
+    }
+  }
+
+  const inspect = [];
+  if (extParts.length) {
+    inspect.push(`Exterior: ${extParts.join(', ')}`);
+  }
+  if (intParts.length) {
+    inspect.push(`Interior: ${intParts.join(', ')}`);
+  }
 
   audit.write(tctx, 'vision.response', {
-    summary: `items:${items.length} highConfLines:${inspect.length}`,
+    summary: `raw:${items.length} high:${high.length} ext:${extParts.length} int:${intParts.length}`,
     out: {
-      sampleItems: items.slice(0, 8),
-      checklist: inspect,
+      sampleRaw: items.slice(0, 10),
+      exteriorLine: inspect[0] || '',
+      interiorLine: inspect[1] || '',
+      rawSnippet: _raw?.slice ? _raw.slice(0, 400) : '',
     },
   });
 
-  // Only "inspect" affects checklist; keep others empty for now
+  // features/colours/damages left empty for now; only checklist matters.
   return {
     features: [],
     colours: [],
     damages: [],
-    inspect, // this becomes 0–2 lines
-    notes: refined.description || '',
+    inspect,
+    notes: '',
   };
 }
 
@@ -325,23 +241,15 @@ async function enrichCarWithFindings(
   const car = await Car.findById(carId);
   if (!car) throw new Error('Car not found');
 
-  // ONLY AI path adds "Inspect ..." lines.
+  // Only AI path adds "Exterior: ..." / "Interior: ..." lines.
   const checklist = new Set(Array.isArray(car.checklist) ? car.checklist : []);
   (inspect || []).forEach((i) => {
     const v = String(i || '').trim();
     if (v) checklist.add(v);
   });
 
-  // description merge kept minimal for now; extend later if needed
-  const desc = new Set(
-    String(car.description || '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-  );
-
+  // Description untouched for now
   car.checklist = [...checklist];
-  car.description = [...desc].join(', ');
   await car.save();
 
   audit.write(tctx, 'vision.enrich', {

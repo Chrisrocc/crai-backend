@@ -27,7 +27,7 @@ const AREA_SYNONYMS = [
 ];
 
 const ISSUE_SYNONYMS = [
-  [/^inspect\s+/gi, ''],                       // NEW: if model already prepended "Inspect", strip it from the issue portion
+  [/^inspect\s+/gi, ''], // if model already prepended "Inspect", strip it from the issue portion
   [/scuffs?/gi, 'Scratch'],
   [/scrapes?/gi, 'Scratch'],
   [/dings?|dints?/gi, 'Dent'],
@@ -44,22 +44,31 @@ const STOP_WORDS = new Set([
   'inspect','possible','for','the','a','an','of','and','to','on','in','at','area','near','around'
 ]);
 
-function normalizeSpaces(s){ return String(s||'').replace(/\s+/g,' ').trim(); }
-function titlecase(s){ return String(s||'').toLowerCase().replace(/\b\w/g,c=>c.toUpperCase()); }
+function normalizeSpaces(s){
+  return String(s || '').replace(/\s+/g, ' ').trim();
+}
+
+function titlecase(s){
+  return String(s || '')
+    .toLowerCase()
+    .replace(/\b\w/g, c => c.toUpperCase());
+}
 
 function applySynonyms(text, pairs){
-  let out = String(text||'');
+  let out = String(text || '');
   for (const [re, repl] of pairs) out = out.replace(re, repl);
   return out;
 }
 
 function normalizeSides(text){
-  let t = String(text||'').toLowerCase();
-  for (const [k, v] of SIDE_MAP) t = t.replace(new RegExp(`\\b${k}\\b`,'g'), v);
-  t = t.replace(/\bleft\s+front\b/g,'front left')
-       .replace(/\bright\s+front\b/g,'front right')
-       .replace(/\bleft\s+rear\b/g,'rear left')
-       .replace(/\bright\s+rear\b/g,'rear right');
+  let t = String(text || '').toLowerCase();
+  for (const [k, v] of SIDE_MAP) {
+    t = t.replace(new RegExp(`\\b${k}\\b`, 'g'), v);
+  }
+  t = t.replace(/\bleft\s+front\b/g, 'front left')
+       .replace(/\bright\s+front\b/g, 'front right')
+       .replace(/\bleft\s+rear\b/g, 'rear left')
+       .replace(/\bright\s+rear\b/g, 'rear right');
   return t;
 }
 
@@ -68,19 +77,22 @@ function normalizeArea(area){
   let a = ' ' + area + ' ';
   a = applySynonyms(a, AREA_SYNONYMS);
   a = normalizeSides(a);
-  a = a.replace(/[()]/g,' ')
-       .replace(/[^a-z0-9\s/-]/gi,' ')
-       .replace(/\b(cover|panel|plastic)\b/gi,'')
-       .replace(/\s+/g,' ')
-       .trim();
+  a = a
+    .replace(/[()]/g, ' ')
+    .replace(/[^a-z0-9\s/-]/gi, ' ')
+    .replace(/\b(cover|panel|plastic)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
   return a || 'vehicle';
 }
 
 function normalizeIssue(issue){
   if (!issue) return '';
   let i = ' ' + issue + ' ';
-  i = applySynonyms(i, ISSUE_SYNONYMS);        // includes stripping any leading "Inspect "
-  i = i.replace(/[^a-z0-9\s/-]/gi,' ').replace(/\s+/g,' ').trim();
+  i = applySynonyms(i, ISSUE_SYNONYMS); // includes stripping any leading "Inspect "
+  i = i.replace(/[^a-z0-9\s/-]/gi, ' ')
+       .replace(/\s+/g, ' ')
+       .trim();
   return titlecase(i);
 }
 
@@ -96,7 +108,7 @@ function normalizeIssue(issue){
  *   - "<issue> - <area>"
  */
 function toInspectCanonical(s){
-  let t = normalizeSpaces(String(s||''));
+  let t = normalizeSpaces(String(s || ''));
 
   let issue = '', area = '';
 
@@ -108,7 +120,7 @@ function toInspectCanonical(s){
   }
 
   // "<issue> (<area>)"
-  if(!issue){
+  if (!issue){
     m = t.match(/^(.*?)(?:\s*\((.+)\))$/);
     if (m){
       issue = normalizeIssue(m[1]);
@@ -117,7 +129,7 @@ function toInspectCanonical(s){
   }
 
   // "<area> for <issue>" | "<issue> on|at|near <area>"
-  if(!issue){
+  if (!issue){
     m = t.match(/^(.*?)\s+for\s+(.+)$/i);
     if (m){
       area  = normalizeArea(m[1]);
@@ -132,16 +144,16 @@ function toInspectCanonical(s){
   }
 
   // "<issue> - <area>"
-  if(!issue){
+  if (!issue){
     m = t.match(/^(.+?)\s*-\s*(.+)$/);
     if (m){
-      issue = normalizeIssue(m[1]);            // ISSUE_SYNONYMS already strips a leading "Inspect "
+      issue = normalizeIssue(m[1]); // ISSUE_SYNONYMS already strips a leading "Inspect "
       area  = normalizeArea(m[2]);
     }
   }
 
   // Fallback
-  if(!issue){
+  if (!issue){
     const guess = normalizeIssue(t);
     if (guess){
       issue = guess;
@@ -157,16 +169,16 @@ function toInspectCanonical(s){
 
 function tokenize(s){
   return s.toLowerCase()
-          .replace(/[^a-z0-9\s/-]/g,' ')
+          .replace(/[^a-z0-9\s/-]/g, ' ')
           .split(/\s+/)
-          .filter(w=>w && !STOP_WORDS.has(w));
+          .filter(w => w && !STOP_WORDS.has(w));
 }
 
-function jaccard(a,b){
-  const A=new Set(a), B=new Set(b);
-  const inter=[...A].filter(x=>B.has(x)).length;
-  const union=new Set([...A,...B]).size;
-  return union ? inter/union : 0;
+function jaccard(a, b){
+  const A = new Set(a), B = new Set(b);
+  const inter = [...A].filter(x => B.has(x)).length;
+  const union = new Set([...A, ...B]).size;
+  return union ? inter / union : 0;
 }
 
 /** -------------------------- PUBLIC NORMALIZERS -------------------------- **/
@@ -174,19 +186,25 @@ function jaccard(a,b){
 /**
  * AI path: normalize + fuzzy de-dupe into strict canonical form.
  */
-function normalizeChecklistAI(items, threshold=0.8){
-  const canon = (Array.isArray(items)?items:[])
-    .map(s=>toInspectCanonical(s))
+function normalizeChecklistAI(items, threshold = 0.8){
+  const canon = (Array.isArray(items) ? items : [])
+    .map(s => toInspectCanonical(s))
     .filter(Boolean);
 
-  const out=[], toks=[];
+  const out = [], toks = [];
   for (const c of canon){
     const t = tokenize(c);
-    let dup=false;
-    for (let i=0;i<out.length;i++){
-      if (jaccard(t,toks[i])>=threshold){ dup=true; break; }
+    let dup = false;
+    for (let i = 0; i < out.length; i++){
+      if (jaccard(t, toks[i]) >= threshold){
+        dup = true;
+        break;
+      }
     }
-    if(!dup){ out.push(c); toks.push(t); }
+    if (!dup){
+      out.push(c);
+      toks.push(t);
+    }
   }
   return out;
 }
@@ -198,20 +216,82 @@ function normalizeChecklistAI(items, threshold=0.8){
  * - case-insensitive dedupe (also ignoring repeated spaces)
  */
 function normalizeChecklistManual(items){
-  const norm = (Array.isArray(items)?items:[])
-    .map(s => normalizeSpaces(String(s||'')))
+  const norm = (Array.isArray(items) ? items : [])
+    .map(s => normalizeSpaces(String(s || '')))
     .filter(Boolean);
 
   const seen = new Set();
   const out = [];
   for (const s of norm){
-    const key = s.toLowerCase().replace(/\s+/g,' ');
+    const key = s.toLowerCase().replace(/\s+/g, ' ');
     if (!seen.has(key)){
       seen.add(key);
-      out.push(s);               // keep exactly as typed
+      out.push(s); // keep exactly as typed
     }
   }
   return out;
+}
+
+/**
+ * Collapse multiple "Exterior: ..." / "Interior: ..." lines into
+ * at most ONE of each for a car, merging and deduping fragments.
+ *
+ * e.g.
+ * [
+ *   "Exterior: front bumper - scratch",
+ *   "Interior: dash - crack",
+ *   "Interior: seat - tear"
+ * ]
+ * =>
+ * [
+ *   "Exterior: front bumper - scratch",
+ *   "Interior: dash - crack, seat - tear"
+ * ]
+ */
+function collapseInteriorExteriorLines(items){
+  const list = Array.isArray(items) ? items : [];
+  const extSet = new Set();
+  const intSet = new Set();
+  const others = [];
+
+  const pushParts = (body, targetSet) => {
+    if (!body) return;
+    body
+      .split(',')
+      .map(s => normalizeSpaces(s))
+      .filter(Boolean)
+      .forEach(part => targetSet.add(part));
+  };
+
+  for (const raw of list){
+    const s = normalizeSpaces(String(raw || ''));
+    if (!s) continue;
+
+    let m = s.match(/^exterior\s*:\s*(.+)$/i);
+    if (m){
+      pushParts(m[1], extSet);
+      continue;
+    }
+    m = s.match(/^interior\s*:\s*(.+)$/i);
+    if (m){
+      pushParts(m[1], intSet);
+      continue;
+    }
+
+    // not an Int/Ext line -> keep as-is
+    others.push(s);
+  }
+
+  const out = [];
+  if (extSet.size){
+    out.push(`Exterior: ${Array.from(extSet).join(', ')}`);
+  }
+  if (intSet.size){
+    out.push(`Interior: ${Array.from(intSet).join(', ')}`);
+  }
+
+  // We return [Exterior, Interior, ...everything else]
+  return [...out, ...others];
 }
 
 module.exports = {
@@ -220,4 +300,6 @@ module.exports = {
   toInspectCanonical,
   // Manual
   normalizeChecklistManual,
+  // Area merger (used by vision enrichment)
+  collapseInteriorExteriorLines,
 };

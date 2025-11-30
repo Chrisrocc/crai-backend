@@ -3,6 +3,9 @@ require('dotenv').config();
 const path = require('path');
 const Car = require('../../models/Car');
 const audit = require('../logging/auditLogger');
+const {
+  collapseInteriorExteriorLines,
+} = require('./checklistDeduper');
 
 let getSignedViewUrl;
 try {
@@ -170,7 +173,8 @@ async function analyzeWithGemini(
     const damage = String(it.damage || '').trim();
     if (!section && !damage) continue;
 
-    const frag = section && damage ? `${section} - ${damage}` : section || damage;
+    const frag =
+      section && damage ? `${section} - ${damage}` : section || damage;
 
     if (area === 'interior') {
       intParts.push(frag);
@@ -248,8 +252,12 @@ async function enrichCarWithFindings(
     if (v) checklist.add(v);
   });
 
+  // Collapse multiple Interior/Exterior lines into ONE of each per car.
+  let mergedChecklist = Array.from(checklist);
+  mergedChecklist = collapseInteriorExteriorLines(mergedChecklist);
+
   // Description untouched for now
-  car.checklist = [...checklist];
+  car.checklist = mergedChecklist;
   await car.save();
 
   audit.write(tctx, 'vision.enrich', {

@@ -213,16 +213,13 @@ function applyDuplicationRules(items) {
    Step 1–3: Filter → Refine → Categorize
 ================================ */
 async function filterRefineCategorize(batch, tctx) {
-  // MESSAGES (human)
   timeline.section(tctx, "MESSAGES", fmt(batch).split("\n"));
-  // MESSAGES (JSON)
   timeline.section(
     tctx,
     "MESSAGES (JSON)",
     [JSON.stringify({ messages: batch || [] }, null, 2)]
   );
 
-  // FILTER
   const f = FilterOut.parse(
     await chatJSON({ system: P.FILTER_SYSTEM, user: fmt(batch) })
   );
@@ -231,13 +228,8 @@ async function filterRefineCategorize(batch, tctx) {
     "FILTER",
     f.messages.map((m) => `${m.speaker}: ${m.text}`)
   );
-  timeline.section(
-    tctx,
-    "FILTER (JSON)",
-    [JSON.stringify(f, null, 2)]
-  );
+  timeline.section(tctx, "FILTER (JSON)", [JSON.stringify(f, null, 2)]);
 
-  // REFINE
   const r = FilterOut.parse(
     await chatJSON({ system: P.REFINE_SYSTEM, user: fmt(f.messages) })
   );
@@ -246,13 +238,8 @@ async function filterRefineCategorize(batch, tctx) {
     "REFINE",
     r.messages.map((m) => `${m.speaker}: ${m.text}`)
   );
-  timeline.section(
-    tctx,
-    "REFINE (JSON)",
-    [JSON.stringify(r, null, 2)]
-  );
+  timeline.section(tctx, "REFINE (JSON)", [JSON.stringify(r, null, 2)]);
 
-  // Categories (dynamic)
   let cats = [];
   try {
     cats = await ReconditionerCategory.find().lean();
@@ -267,13 +254,10 @@ async function filterRefineCategorize(batch, tctx) {
 
   if (DEBUG) {
     console.log("\n==== PIPELINE DEBUG :: CATEGORIZER (Step 3) ====");
-    console.log(
-      "Recon hints: (configured from DB, suppressed in logs)"
-    );
+    console.log("Recon hints: (configured from DB, suppressed)");
     const userPayload = fmt(r.messages);
     console.log("\n-- User payload --\n" + (userPayload || "(empty)"));
-    console.log("\n-- System prompt: CATEGORIZE (dynamic or static) --");
-    console.log("  (full prompt suppressed in logs to keep output clean)");
+    console.log("\n-- System prompt -- (hidden)");
     console.log("==============================================\n");
   }
 
@@ -286,11 +270,7 @@ async function filterRefineCategorize(batch, tctx) {
     "CATEGORIZE",
     c.items.map((i) => `${i.category} — ${i.speaker}: '${i.text}'`)
   );
-  timeline.section(
-    tctx,
-    "CATEGORIZE (JSON)",
-    [JSON.stringify(c, null, 2)]
-  );
+  timeline.section(tctx, "CATEGORIZE (JSON)", [JSON.stringify(c, null, 2)]);
 
   const withDupes = applyDuplicationRules(c.items);
   return { refined: r.messages, categorized: withDupes };
@@ -326,7 +306,6 @@ async function extractActions(items, tctx) {
     const make = String(act.make || "").toLowerCase();
     const model = String(act.model || "").toLowerCase();
 
-    // 1) Exact rego (whitespace-insensitive) in text
     if (rego) {
       for (const c of candidates) {
         const txt = String(c.text || "");
@@ -335,7 +314,6 @@ async function extractActions(items, tctx) {
       }
     }
 
-    // 2) Make + model tokens in text
     const tokens = [make, model].filter(Boolean);
     if (tokens.length) {
       for (const c of candidates) {
@@ -346,7 +324,6 @@ async function extractActions(items, tctx) {
       }
     }
 
-    // 3) Fallback: first candidate
     return candidates[0] || null;
   }
 
@@ -359,7 +336,6 @@ async function extractActions(items, tctx) {
 
     const raw = await chatJSON({ system: sys, user: userText });
 
-    // PROMPT log: human + JSON output
     timeline.prompt(tctx, label, {
       inputText: userText,
       outputText: JSON.stringify(raw, null, 2),
@@ -418,7 +394,6 @@ async function extractActions(items, tctx) {
     if (userText) {
       const raw = await chatJSON({ system: sys, user: userText });
 
-      // Do NOT spam keywords in logs; just label that they're used.
       const inputLabelled = [
         "=== RECON APPOINTMENT INPUT (text) ===",
         userText,
@@ -449,45 +424,52 @@ async function extractActions(items, tctx) {
   await run("NEXT_LOCATION", P.EXTRACT_NEXT_LOCATION, "EXTRACT_NEXT_LOCATION");
   await run("TASK", P.EXTRACT_TASK, "EXTRACT_TASK");
 
-  // Normalize rego
   for (const a of actions) {
     if ("rego" in a && a.rego) {
       a.rego = a.rego.replace(/\s+/g, "").toUpperCase();
     }
   }
 
-  // For logging: keep the full, raw action set (with _source fields)
   timeline.actions(tctx, actions);
   return actions;
 }
 
 /* ================================
-   Audit Gatekeeper
+   NEW AUDIT GATEKEEPER (hallucination filter)
 ================================ */
-/**
- * Apply AI audit as a gatekeeper.
- * We drop any action the audit marks as INCORRECT.
- * CORRECT / PARTIAL / UNSURE pass through.
- */
 function applyAuditGate(actions, audit) {
   if (!audit || !Array.isArray(audit.items)) return actions;
 
   const verdictByIndex = new Map();
+  const evidenceByIndex = new Map();
+
   for (const item of audit.items) {
     if (typeof item.actionIndex === "number") {
       verdictByIndex.set(item.actionIndex, item.verdict);
+
+      const ev =
+        typeof item.evidenceText === "string"
+          ? item.evidenceText.trim()
+          : "";
+      evidenceByIndex.set(item.actionIndex, ev);
     }
   }
 
   const gated = [];
+
   actions.forEach((a, idx) => {
     const verdict = verdictByIndex.get(idx);
+    const evidence = evidenceByIndex.get(idx) || "";
 
-    // ❗ Never block RECON_APPOINTMENT based on the audit.
-    // The audit is too strict ("no appointment mentioned") and we still
-    // want recon rows whenever repairs are extracted.
-    if (verdict === "INCORRECT" && a.type !== "RECON_APPOINTMENT") {
-      return; // drop only non-recon actions marked incorrect
+    // ❌ Block only true hallucinations:
+    // INCORRECT + no evidence + not recon
+    const hallucinated =
+      verdict === "INCORRECT" &&
+      !evidence &&
+      a.type !== "RECON_APPOINTMENT";
+
+    if (hallucinated) {
+      return; // blocked
     }
 
     gated.push(a);
@@ -496,25 +478,19 @@ function applyAuditGate(actions, audit) {
   return gated;
 }
 
-
 /* ================================
    Public API
 ================================ */
 async function processBatch(messages, tctx) {
-  // 1) Filter / Refine / Categorize
   const { refined, categorized } = await filterRefineCategorize(messages, tctx);
 
-  // 2) Extract actions (raw, potentially with some hallucinations)
   const actions = await extractActions(categorized, tctx);
 
-  // 3) AI AUDIT (read-only, per-action justification)
   const audit = await runAudit({ batch: messages, refined, actions });
   timeline.recordAudit(tctx, audit);
 
-  // 4) Gatekeeper: drop actions marked INCORRECT by the audit
   const gatedActions = applyAuditGate(actions, audit);
 
-  // What we return to the caller is the cleaned, gated list
   return { actions: gatedActions, categorized };
 }
 

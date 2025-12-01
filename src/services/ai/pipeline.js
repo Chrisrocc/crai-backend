@@ -254,10 +254,9 @@ async function filterRefineCategorize(batch, tctx) {
 
   if (DEBUG) {
     console.log("\n==== PIPELINE DEBUG :: CATEGORIZER (Step 3) ====");
-    console.log("Recon hints: (configured from DB, suppressed)");
+    console.log("Recon hints: (suppressed)");
     const userPayload = fmt(r.messages);
     console.log("\n-- User payload --\n" + (userPayload || "(empty)"));
-    console.log("\n-- System prompt -- (hidden)");
     console.log("==============================================\n");
   }
 
@@ -398,7 +397,7 @@ async function extractActions(items, tctx) {
         "=== RECON APPOINTMENT INPUT (text) ===",
         userText,
         "",
-        "=== CATEGORY CONFIG (used, not expanded here) ===",
+        "=== CATEGORY CONFIG (suppressed) ===",
         `allowed: [${allowed}]`,
       ].join("\n");
 
@@ -435,23 +434,17 @@ async function extractActions(items, tctx) {
 }
 
 /* ================================
-   NEW AUDIT GATEKEEPER (hallucination filter)
+   🔥 NEW AUDIT GATEKEEPER
+   Rule: ANY "INCORRECT" = BLOCKED
 ================================ */
 function applyAuditGate(actions, audit) {
   if (!audit || !Array.isArray(audit.items)) return actions;
 
   const verdictByIndex = new Map();
-  const evidenceByIndex = new Map();
 
   for (const item of audit.items) {
     if (typeof item.actionIndex === "number") {
       verdictByIndex.set(item.actionIndex, item.verdict);
-
-      const ev =
-        typeof item.evidenceText === "string"
-          ? item.evidenceText.trim()
-          : "";
-      evidenceByIndex.set(item.actionIndex, ev);
     }
   }
 
@@ -459,17 +452,14 @@ function applyAuditGate(actions, audit) {
 
   actions.forEach((a, idx) => {
     const verdict = verdictByIndex.get(idx);
-    const evidence = evidenceByIndex.get(idx) || "";
 
-    // ❌ Block only true hallucinations:
-    // INCORRECT + no evidence + not recon
-    const hallucinated =
-      verdict === "INCORRECT" &&
-      !evidence &&
-      a.type !== "RECON_APPOINTMENT";
-
-    if (hallucinated) {
-      return; // blocked
+    if (verdict === "INCORRECT") {
+      if (DEBUG) {
+        console.log(
+          `[PIPELINE] BLOCKED (audit INCORRECT) — action #${idx}: ${a.type} — "${a._sourceText}"`
+        );
+      }
+      return; // skip this action entirely
     }
 
     gated.push(a);

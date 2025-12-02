@@ -1,5 +1,6 @@
 // src/services/logging/timelineLogger.js
 const { randomUUID } = require("crypto");
+
 const _store = new Map();
 
 /* ────────────────────────────────────────────
@@ -14,9 +15,10 @@ function newContext({ chatId }) {
   const ctx = {
     id,
     chatId,
-    sections: [],      // MESSAGES, FILTER, REFINE, CATEGORIZE...
+    startedAt: new Date().toISOString(),
+    sections: [],      // MESSAGES, FILTER, REFINE, CATEGORIZE, PHOTO_MERGER...
     promptOutputs: [], // EXTRACT_* prompts
-    actions: [],       // final actions
+    actions: [],       // final actions (after audit gate)
     audit: null,       // audit object
   };
 
@@ -49,7 +51,7 @@ function prompt(ctx, name, { inputText = "", outputText = "" } = {}) {
   s.promptOutputs.push({
     name: String(name || ""),
     input: inputText || "",
-    output: outputText, // can be string or object
+    output: outputText, // string or object
   });
 }
 
@@ -69,12 +71,16 @@ function recordAudit(ctx, auditObj) {
 }
 
 /* ────────────────────────────────────────────
-   PRINTER — EXACT 0️⃣–4️⃣ STYLE
+   PRINTER — CRYSTAL CLEAR, ONE BATCH
 ──────────────────────────────────────────── */
 function print(ctx) {
   const s = get(ctx);
   if (!s) return;
 
+  const headerTs = s.startedAt || new Date().toISOString();
+  const chatId = s.chatId != null ? s.chatId : "unknown";
+
+  const messagesLines = [];
   const photoLines = [];
   const filterLines = [];
   const refineLines = [];
@@ -83,7 +89,9 @@ function print(ctx) {
   for (const blk of s.sections) {
     const title = (blk.title || "").toUpperCase();
 
-    if (title === "PHOTO_MERGER") {
+    if (title === "MESSAGES") {
+      messagesLines.push(...blk.lines);
+    } else if (title === "PHOTO_MERGER") {
       photoLines.push(...blk.lines);
     } else if (title === "FILTER") {
       filterLines.push(...blk.lines);
@@ -94,9 +102,27 @@ function print(ctx) {
     }
   }
 
-  /* 0️⃣ PHOTO_MERGER */
+  console.log(
+    "\n============================================================"
+  );
+  console.log(`🧾 PIPELINE LOG — chat ${chatId} — ctx ${s.id}`);
+  console.log(`   started: ${headerTs}`);
+  console.log(
+    "============================================================\n"
+  );
+
+  /* 0️⃣ RAW MESSAGES */
+  if (messagesLines.length) {
+    console.log("0️⃣ RAW MESSAGES\n");
+    messagesLines.forEach((line, idx) => {
+      console.log(`${idx + 1}. ${line}`);
+    });
+    console.log("");
+  }
+
+  /* 0.5️⃣ PHOTO MERGER (if any) */
   if (photoLines.length) {
-    console.log("0️⃣ PHOTO_MERGER\n");
+    console.log("0.5️⃣ PHOTO_MERGER\n");
     console.log("Output:\n");
     for (const line of photoLines) console.log(line);
     console.log("");
@@ -132,20 +158,19 @@ function print(ctx) {
   );
 
   if (extractorPrompts.length) {
-    console.log("4️⃣ EXTRACTORS");
+    console.log("4️⃣ EXTRACTORS (model outputs)");
     for (const p of extractorPrompts) {
-      console.log(p.name);
+      console.log(`\n🔹 ${p.name}`);
 
       let out = p.output;
 
-      // handle both JSON strings and plain objects
+      // attempt JSON parse if it's a string
       if (typeof out === "string") {
         try {
           out = JSON.parse(out);
         } catch {
           // not JSON, just print raw
           console.log(out);
-          console.log("");
           continue;
         }
       }
@@ -160,30 +185,32 @@ function print(ctx) {
           if (a.badge) parts.push(`badge:"${a.badge}"`);
           if (a.description) parts.push(`description:"${a.description}"`);
           if (a.year) parts.push(`year:"${a.year}"`);
-          if (a.checklistItem) parts.push(`checklistItem:"${a.checklistItem}"`);
+          if (a.checklistItem)
+            parts.push(`checklistItem:"${a.checklistItem}"`);
           if (a.readiness) parts.push(`readiness:"${a.readiness}"`);
           if (a.category) parts.push(`category:"${a.category}"`);
           if (a.destination) parts.push(`destination:"${a.destination}"`);
-          if (a.nextLocation) parts.push(`nextLocation:"${a.nextLocation}"`);
+          if (a.nextLocation)
+            parts.push(`nextLocation:"${a.nextLocation}"`);
           if (a.dateTime) parts.push(`dateTime:"${a.dateTime}"`);
           if (a.task) parts.push(`task:"${a.task}"`);
           if (a.name) parts.push(`name:"${a.name}"`);
           if (a.service) parts.push(`service:"${a.service}"`);
           if (a.notes) parts.push(`notes:"${a.notes}"`);
 
-          console.log(`{${parts.join(", ")}}`);
+          console.log(`  {${parts.join(", ")}}`);
         }
       } else {
         console.log(String(p.output ?? ""));
       }
-      console.log(""); // blank line between extractors
     }
+    console.log("");
   }
 
-  /* FINAL OUTPUT LINES (already match your format) */
+  /* 5️⃣ ACTIONS APPLIED TO DB (after audit gate) */
   if (s.actions && s.actions.length) {
-    console.log("OUTPUT");
-    for (const a of s.actions) {
+    console.log("5️⃣ ACTIONS APPLIED TO DB (after audit gate)\n");
+    s.actions.forEach((a, idx) => {
       const src = `${a._sourceSpeaker || ""}: '${a._sourceText || ""}'`;
       const car =
         [a.rego, [a.make, a.model].filter(Boolean).join(" ")]
@@ -197,15 +224,39 @@ function print(ctx) {
         detail = `, readiness: ${a.readiness}`;
       else if (a.type === "RECON_APPOINTMENT" && a.category)
         detail = `, category: ${a.category}`;
+      else if (a.type === "DROP_OFF" && a.destination)
+        detail = `, destination: ${a.destination}`;
+      else if (a.type === "TASK" && a.task)
+        detail = `, task: ${a.task}`;
 
-      console.log(`- ${a.type} — ${src} {${car}${detail}}`);
-    }
+      console.log(
+        `${idx + 1}. ${a.type} — ${src} {${car}${detail}}`
+      );
+    });
+    console.log("");
+  } else {
+    console.log("5️⃣ ACTIONS APPLIED TO DB (after audit gate)\n");
+    console.log("(no actions)\n");
   }
 
-  /* ANALYSIS OF EACH LINE */
-  console.log("\nANALYSIS OF EACH LINE");
+  /* 6️⃣ AUDIT SUMMARY */
+  if (s.audit && s.audit.summary) {
+    const sum = s.audit.summary;
+    console.log("6️⃣ AUDIT SUMMARY\n");
+    console.log(
+      `   total: ${sum.total}, ` +
+        `correct: ${sum.correct}, ` +
+        `partial: ${sum.partial}, ` +
+        `incorrect: ${sum.incorrect}, ` +
+        `unsure: ${sum.unsure}`
+    );
+    console.log("");
+  }
 
-  if (s.audit && Array.isArray(s.audit.items)) {
+  /* 7️⃣ AUDIT DETAIL PER ACTION */
+  console.log("7️⃣ AUDIT DETAIL PER ACTION\n");
+
+  if (s.audit && Array.isArray(s.audit.items) && s.actions.length) {
     for (const it of s.audit.items) {
       const act = s.actions[it.actionIndex];
       if (!act) continue;
@@ -222,6 +273,10 @@ function print(ctx) {
         detail = `, readiness: ${act.readiness}`;
       else if (act.type === "RECON_APPOINTMENT" && act.category)
         detail = `, category: ${act.category}`;
+      else if (act.type === "DROP_OFF" && act.destination)
+        detail = `, destination: ${act.destination}`;
+      else if (act.type === "TASK" && act.task)
+        detail = `, task: ${act.task}`;
 
       const src = `${act._sourceSpeaker || ""}: '${act._sourceText || ""}'`;
       const base = `${act.type} — ${src} {${car}${detail}}`;
@@ -231,9 +286,17 @@ function print(ctx) {
         ? ` — evidence: "${it.evidenceText}"`
         : "";
 
-      console.log(`- ${base}: ${it.verdict}${reasonPart}${evidencePart}`);
+      console.log(
+        `- [${it.verdict}] ${base}${reasonPart}${evidencePart}`
+      );
     }
+  } else {
+    console.log("(no audit items)");
   }
+
+  console.log(
+    "\n==================== END PIPELINE LOG ====================\n"
+  );
 
   _store.delete(s.id);
 }
@@ -262,7 +325,7 @@ module.exports = {
   actions,
   recordAudit,
   print,
-  // legacy
+  // legacy (no-op)
   recordPrompt,
   identSuccess,
   identFail,

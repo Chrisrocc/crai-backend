@@ -1,3 +1,4 @@
+// src/bots/telegram.js
 require('dotenv').config();
 const { Telegraf } = require('telegraf');
 
@@ -13,7 +14,10 @@ const {
   ensureCarForAction,
 } = require('../services/updaters/carUpdater');
 
-const { createDropOffTask, createGenericTask } = require('../services/creators/taskCreator');
+const {
+  createDropOffTask,
+  createGenericTask,
+} = require('../services/creators/taskCreator');
 const { createCustomerAppointment } = require('../services/creators/customerAppointmentCreator');
 const { createReconditionerAppointment } = require('../services/creators/reconAppointmentCreator');
 
@@ -28,13 +32,19 @@ const bot = new Telegraf(BOT_TOKEN);
 /* ----------------------------------------------------------------
    Silence / notify controls
 ---------------------------------------------------------------- */
-const SILENT_ALL_GROUPS = String(process.env.TELEGRAM_SILENT_ALL_GROUPS || 'true').toLowerCase() === 'true';
+const SILENT_ALL_GROUPS = String(
+  process.env.TELEGRAM_SILENT_ALL_GROUPS || 'true'
+)
+  .toLowerCase()
+  .trim() === 'true';
+
 const SILENT_GROUP_IDS = new Set(
   (process.env.TELEGRAM_SILENT_GROUP_IDS || '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean)
 );
+
 const ADMIN_CHAT_ID = process.env.TELEGRAM_ADMIN_CHAT_ID || '';
 
 function isGroupChatId(id) {
@@ -53,7 +63,11 @@ async function safeReply(ctx, text, extra) {
   try {
     if (shouldSilenceChat(ctx.chat)) {
       if (ADMIN_CHAT_ID) {
-        await bot.telegram.sendMessage(ADMIN_CHAT_ID, `[#${ctx.chat?.id}] ${text}`, extra);
+        await bot.telegram.sendMessage(
+          ADMIN_CHAT_ID,
+          `[#${ctx.chat?.id}] ${text}`,
+          extra
+        );
       }
       return;
     }
@@ -65,10 +79,16 @@ async function safeReply(ctx, text, extra) {
 
 async function notifyChatOrAdmin(chatId, text, extra) {
   try {
-    const silent = SILENT_GROUP_IDS.has(String(chatId)) || (SILENT_ALL_GROUPS && isGroupChatId(chatId));
+    const silent =
+      SILENT_GROUP_IDS.has(String(chatId)) ||
+      (SILENT_ALL_GROUPS && isGroupChatId(chatId));
     if (silent) {
       if (ADMIN_CHAT_ID) {
-        await bot.telegram.sendMessage(ADMIN_CHAT_ID, `[#${chatId}] ${text}`, extra);
+        await bot.telegram.sendMessage(
+          ADMIN_CHAT_ID,
+          `[#${chatId}] ${text}`,
+          extra
+        );
       }
       return;
     }
@@ -93,6 +113,8 @@ const batcher = new Batcher({
   windowMs: 60_000,
   onFlush: async (chatId, messages) => {
     const tctx = timeline.newContext({ chatId });
+
+    // Full pipeline (filter/refine/categorize/extract/audit/gate)
     const { actions } = await processBatch(messages, tctx);
 
     const out = [];
@@ -107,7 +129,9 @@ const batcher = new Batcher({
           const key = String(a.rego).toUpperCase().replace(/\s+/g, '');
           const mapped = regoMap[key];
           if (mapped && mapped !== a.rego) {
-            regoNormLines.push(`🔁 Rego normalized for ${a.type}: ${a.rego} → ${mapped}`);
+            regoNormLines.push(
+              `🔁 Rego normalized for ${a.type}: ${a.rego} → ${mapped}`
+            );
             a.rego = mapped;
           }
         }
@@ -129,7 +153,9 @@ const batcher = new Batcher({
           }
           case 'SOLD': {
             const r = await applySold(a, tctx);
-            msg = r.changed ? `✅ ${r.car.rego} marked Sold` : `ℹ️ ${r.car.rego} already Sold`;
+            msg = r.changed
+              ? `✅ ${r.car.rego} marked Sold`
+              : `ℹ️ ${r.car.rego} already Sold`;
             break;
           }
           case 'REPAIR': {
@@ -150,19 +176,27 @@ const batcher = new Batcher({
           case 'CUSTOMER_APPOINTMENT': {
             const r = await createCustomerAppointment(a, tctx);
             const label = r.car
-              ? r.car.rego || [r.car.make, r.car.model].filter(Boolean).join(' ')
+              ? r.car.rego ||
+                [r.car.make, r.car.model].filter(Boolean).join(' ')
               : r.appointment?.carText || 'unidentified vehicle';
-            const when = r.appointment?.dateTime ? ` @ ${r.appointment.dateTime}` : '';
+            const when = r.appointment?.dateTime
+              ? ` @ ${r.appointment.dateTime}`
+              : '';
             msg = `👤 Customer appt created for ${label}${when}`;
             break;
           }
           case 'RECON_APPOINTMENT': {
             const r = await createReconditionerAppointment(a, tctx);
             const label = r.car
-              ? r.car.rego || `${r.car.make} ${r.car.model}`.trim()
+              ? r.car.rego ||
+                `${r.car.make} ${r.car.model}`.trim()
               : r.carText || 'unidentified vehicle';
-            const when = r.appointment?.dateTime ? ` @ ${r.appointment.dateTime}` : '';
-            const cat = r.appointment?.category?.name ? ` • ${r.appointment.category.name}` : '';
+            const when = r.appointment?.dateTime
+              ? ` @ ${r.appointment.dateTime}`
+              : '';
+            const cat = r.appointment?.category?.name
+              ? ` • ${r.appointment.category.name}`
+              : '';
             msg = `🔧 Recon appt created for ${label}${when} (${r.appointment.name}${cat})`;
             break;
           }
@@ -182,7 +216,12 @@ const batcher = new Batcher({
         out.push(msg);
       } catch (err) {
         if (typeof timeline.identFail === 'function') {
-          timeline.identFail(tctx, { reason: err.message, rego: a.rego, make: a.make, model: a.model });
+          timeline.identFail(tctx, {
+            reason: err.message,
+            rego: a.rego,
+            make: a.make,
+            model: a.model,
+          });
         }
         out.push(`❌ ${a.type} ${a.rego || ''}: ${err.message}`);
       }
@@ -208,6 +247,8 @@ const batcher = new Batcher({
 
     const body = lines.join('\n');
     await notifyChatOrAdmin(chatId, body);
+
+    // 🔚 Print the full, structured pipeline log for this batch
     timeline.print(tctx);
   },
 });
@@ -217,12 +258,24 @@ const batcher = new Batcher({
 ---------------------------------------------------------------- */
 const senderName = (ctx) => {
   const u = ctx.from || {};
-  return u.username || [u.first_name, u.last_name].filter(Boolean).join(' ') || 'Unknown';
+  return (
+    u.username ||
+    [u.first_name, u.last_name].filter(Boolean).join(' ') ||
+    'Unknown'
+  );
 };
 
 const addToBatch = (ctx, text, key, tsOverride) => {
-  const ts = tsOverride ?? (ctx.message?.date ? ctx.message.date * 1000 : Date.now());
-  batcher.addMessage({ chatId: ctx.chat.id, speaker: senderName(ctx), text, key, ts });
+  const ts =
+    tsOverride ??
+    (ctx.message?.date ? ctx.message.date * 1000 : Date.now());
+  batcher.addMessage({
+    chatId: ctx.chat.id,
+    speaker: senderName(ctx),
+    text,
+    key,
+    ts,
+  });
 };
 
 function guessImageMime(buffer, filename = '') {
@@ -230,8 +283,21 @@ function guessImageMime(buffer, filename = '') {
   if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
   if (ext === 'png') return 'image/png';
   if (ext === 'webp') return 'image/webp';
-  if (buffer.length > 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
-  if (buffer.length > 8 && buffer.slice(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) return 'image/png';
+
+  if (
+    buffer.length > 3 &&
+    buffer[0] === 0xff &&
+    buffer[1] === 0xd8 &&
+    buffer[2] === 0xff
+  )
+    return 'image/jpeg';
+  if (
+    buffer.length > 8 &&
+    buffer
+      .slice(0, 8)
+      .equals(Buffer.from('89504e470d0a1a0a', 'hex'))
+  )
+    return 'image/png';
   return 'image/jpeg';
 }
 
@@ -270,7 +336,9 @@ bot.on('text', async (ctx) => {
 ---------------------------------------------------------------- */
 bot.on('photo', async (ctx) => {
   const photos = ctx.message.photo || [];
-  if (!photos.length) return safeReply(ctx, '⚠️ No photo sizes found.');
+  if (!photos.length) {
+    return safeReply(ctx, '⚠️ No photo sizes found.');
+  }
 
   const key = ctx.message.message_id;
   addToBatch(ctx, 'Photo', key);
@@ -309,16 +377,27 @@ bot.on('photo', async (ctx) => {
       );
 
       const car = ensureInfo.car;
-      console.log(`✅ Ensured car exists: ${car.rego} (${car.make || ''} ${car.model || ''})`);
+      console.log(
+        `✅ Ensured car exists: ${car.rego} (${car.make || ''} ${
+          car.model || ''
+        })`
+      );
 
       // Store log lines for next batch summary
       if (ensureInfo.logLines && ensureInfo.logLines.length) {
-        lastRegoLogByChat.set(ctx.chat.id, ensureInfo.logLines.slice());
+        lastRegoLogByChat.set(
+          ctx.chat.id,
+          ensureInfo.logLines.slice()
+        );
       }
 
       // Store rego mapping: raw (veh.rego) -> canonical (car.rego)
-      const raw = String(veh.rego || '').toUpperCase().replace(/\s+/g, '');
-      const canonical = String(car.rego || '').toUpperCase().replace(/\s+/g, '');
+      const raw = String(veh.rego || '')
+        .toUpperCase()
+        .replace(/\s+/g, '');
+      const canonical = String(car.rego || '')
+        .toUpperCase()
+        .replace(/\s+/g, '');
       if (raw && canonical && raw !== canonical) {
         const existing = lastRegoMapByChat.get(ctx.chat.id) || {};
         existing[raw] = canonical;
@@ -331,17 +410,21 @@ bot.on('photo', async (ctx) => {
     if (veh.analysis && !veh.make && !veh.model && !veh.rego) {
       analysis = `Photo analysis: ${veh.analysis}`;
     } else {
-      const desc = [veh.make, veh.model, veh.colorDescription].filter(Boolean).join(' ');
-      analysis = `Photo analysis: ${desc}${veh.rego ? `, rego ${veh.rego}` : ''}${
-        veh.analysis ? ` — ${veh.analysis}` : ''
-      }`;
+      const desc = [veh.make, veh.model, veh.colorDescription]
+        .filter(Boolean)
+        .join(' ');
+      analysis = `Photo analysis: ${desc}${
+        veh.rego ? `, rego ${veh.rego}` : ''
+      }${veh.analysis ? ` — ${veh.analysis}` : ''}`;
     }
 
     const ok = batcher.updateMessage(ctx.chat.id, key, analysis);
 
     const cap = (ctx.message.caption || '').trim();
     if (cap) {
-      const baseTs = ctx.message?.date ? ctx.message.date * 1000 : Date.now();
+      const baseTs = ctx.message?.date
+        ? ctx.message.date * 1000
+        : Date.now();
       addToBatch(ctx, cap, `${key}:caption`, baseTs + 1);
     }
 
@@ -353,12 +436,17 @@ bot.on('photo', async (ctx) => {
     await safeReply(
       ctx,
       ok
-        ? `✅ Added to batch: ${analysis}${cap ? `\n📝 Caption: ${cap}` : ''}${regoLog}`
+        ? `✅ Added to batch: ${analysis}${
+            cap ? `\n📝 Caption: ${cap}` : ''
+          }${regoLog}`
         : `ℹ️ Analysis ready, but batch already flushed.${regoLog}`
     );
   } catch (err) {
     console.error('photo handler error:', err);
-    await safeReply(ctx, `❌ Photo analysis failed: ${err.message || 'unknown error'}`);
+    await safeReply(
+      ctx,
+      `❌ Photo analysis failed: ${err.message || 'unknown error'}`
+    );
   }
 });
 

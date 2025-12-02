@@ -240,6 +240,20 @@ async function filterRefineCategorize(batch, tctx) {
   );
   timeline.section(tctx, "REFINE (JSON)", [JSON.stringify(r, null, 2)]);
 
+  // 🛑 NEW: if nothing actionable survives REFINE, skip categorization entirely
+  if (!r.messages || r.messages.length === 0) {
+    timeline.section(tctx, "CATEGORIZE", [
+      "(skipped — no refined messages, likely off-topic)",
+    ]);
+    timeline.section(
+      tctx,
+      "CATEGORIZE (JSON)",
+      [JSON.stringify({ items: [] }, null, 2)]
+    );
+
+    return { refined: r.messages, categorized: [] };
+  }
+
   let cats = [];
   try {
     cats = await ReconditionerCategory.find().lean();
@@ -429,13 +443,13 @@ async function extractActions(items, tctx) {
     }
   }
 
-  timeline.actions(tctx, actions);
+  // ⛔️ Do NOT log here; we only want to log the gated actions in processBatch
   return actions;
 }
 
 /* ================================
-   🔥 NEW AUDIT GATEKEEPER
-   Rule: ANY "INCORRECT" = BLOCKED
+   🔥 AUDIT GATEKEEPER
+   Rule: any "INCORRECT" = BLOCKED
 ================================ */
 function applyAuditGate(actions, audit) {
   if (!audit || !Array.isArray(audit.items)) return actions;
@@ -480,6 +494,9 @@ async function processBatch(messages, tctx) {
   timeline.recordAudit(tctx, audit);
 
   const gatedActions = applyAuditGate(actions, audit);
+
+  // ✅ Log ONLY the gated (allowed) actions to the timeline
+  timeline.actions(tctx, gatedActions);
 
   return { actions: gatedActions, categorized };
 }

@@ -41,7 +41,6 @@ function fmtMsgs(msgs) {
 function fmtActions(actions) {
   return (Array.isArray(actions) ? actions : [])
     .map((a, i) => {
-      // Keep this compact but informative for the auditor
       const car = [
         a.rego || "",
         [a.make || "", a.model || ""].filter(Boolean).join(" "),
@@ -58,8 +57,12 @@ function fmtActions(actions) {
       if (a.dateTime) extra.push(`dateTime:${a.dateTime}`);
       if (a.task) extra.push(`task:${a.task}`);
       if (a.name) extra.push(`name:${a.name}`);
+      if (a.service) extra.push(`service:${a.service}`);
+      if (a.notes) extra.push(`notes:${a.notes}`);
 
-      return `${i + 1}. ${a.type} ${car || ""}${extra.length ? " | " + extra.join(" | ") : ""}`;
+      return `${i + 1}. ${a.type} ${car || ""}${
+        extra.length ? " | " + extra.join(" | ") : ""
+      }`;
     })
     .join("\n");
 }
@@ -70,63 +73,168 @@ function fmtActions(actions) {
 const SYSTEM = `
 You are auditing extracted "actions" against the original chat messages from a car yard workflow.
 
+You are NOT generating new actions. You are ONLY judging whether each existing action is supported by the messages.
+
 You must return STRICT minified JSON only:
 {"summary":{"total":0,"correct":0,"partial":0,"incorrect":0,"unsure":0},"items":[{"actionIndex":0,"verdict":"CORRECT","reason":"","evidenceText":"","evidenceSourceIndex":1}]}
 
 No extra keys. No comments. No trailing commas.
 
-INTERPRETATION RULES
-- Treat the original messages as the ONLY source of truth.
-- Each action must be checked against the content of the messages.
-- Never reward hallucinations: if any part of the action is not clearly supported by the text, mark it INCORRECT or PARTIAL.
-- If you are genuinely unsure, use UNSURE instead of guessing CORRECT.
+==================================================
+GLOBAL PRINCIPLES
+==================================================
+- The original MESSAGES are the ONLY source of truth.
+- An action is CORRECT when it matches what the messages clearly say or strongly imply.
+- Only mark INCORRECT when there is a clear mismatch or hallucination.
+- If you are genuinely unsure, use UNSURE instead of guessing.
+- Do NOT require “appointments” for types that are not appointments (e.g., TASK, DROP_OFF, NEXT_LOCATION).
 
+You are auditing actions of several types:
+- LOCATION_UPDATE
+- DROP_OFF
+- CUSTOMER_APPOINTMENT
+- RECON_APPOINTMENT
+- READY
+- TASK
+- REPAIR
+- SOLD
+- NEXT_LOCATION
+
+==================================================
+TYPE-SPECIFIC INTERPRETATION
+==================================================
+
+1) DROP_OFF
+- Typical language: "take", "drop", "bring", "deliver", "leave", "to [place/person]".
+- CORRECT if:
+  - The car (rego or make/model) is clearly mentioned.
+  - The destination matches the message ("to Unique", "to Imad", etc.).
+- Example:
+  - Message: "Take the CLA250 to Unique."
+  - Action: DROP_OFF, make:Mercedes-Benz, model:CLA250, destination:"Unique"
+  → CORRECT.
+
+2) NEXT_LOCATION
+- Future or intended destination only ("to Imad", "next location Imad", "needs to go to Capital").
+- Does NOT have to be a customer appointment.
+- CORRECT if:
+  - The car matches the message.
+  - The nextLocation matches the destination in the message.
+- Example:
+  - Message: "Bring the Hilux from Unique to Imad."
+  - Action: NEXT_LOCATION, make:Toyota, model:Hilux, nextLocation:"Imad"
+  → CORRECT.
+
+3) TASK
+- Generic to-do items and people logistics:
+  - "come back in an Uber"
+  - "take photos of the Ranger"
+  - "order relay for GTI AC"
+- No appointment is required.
+- CORRECT if the task text matches the instruction.
+- Example:
+  - Message: "Come back to Northpoint in an Uber."
+  - Action: TASK, task:"come back to Northpoint in an Uber"
+  → CORRECT.
+
+4) CUSTOMER_APPOINTMENT
+- Customer viewing or pickup of a car:
+  - "Customer coming at 2 PM to view Camry."
+  - "Lisa is picking up the Camry at 2pm."
+- CORRECT if:
+  - The car matches.
+  - The text clearly states a viewing or pickup by a customer/person.
+  - dateTime/name/notes are consistent with the message. Extra minor wording ("pick up car") is fine.
+- PARTIAL if the car and intent are correct but time/name are over-interpreted.
+- INCORRECT if there is NO appointment or the wrong car.
+
+5) RECON_APPOINTMENT
+- Booked work at a provider or explicit booking language:
+  - "Booked with Imad for bumper repair."
+  - "Jan is coming to fix Civic airbag light."
+- CORRECT only when the message clearly implies a booking or service appointment.
+- If the message ONLY says the car "needs" something with no booking/appointment and the action pretends there is an appointment with a provider, treat that as at best PARTIAL or INCORRECT (depending on how strong the hallucination is).
+
+6) REPAIR
+- Faults, damage, or mechanical/body work:
+  - "needs a new bumper"
+  - "oil leak", "engine work", "tyres bald"
+- CORRECT if:
+  - The car matches.
+  - checklistItem summarizes the fault/repair mentioned in the message.
+- PARTIAL if the repair is basically right but over-specific compared to the text.
+- INCORRECT if the repair or car is invented.
+
+7) LOCATION_UPDATE
+- Where a car is or will be:
+  - "at Northpoint", "at Haytham's", "moving from Capital to Louie".
+- CORRECT if:
+  - The car matches.
+  - The location matches the place described.
+
+8) READY
+- A car being ready (for pickup, viewing, sale, etc.):
+  - "Prado is ready for pickup."
+  - "Hilux is ready to go online."
+- CORRECT if:
+  - The car matches.
+  - readiness summarises the "ready" statement.
+
+9) SOLD
+- Car sale events:
+  - "Hilux was sold this morning."
+- CORRECT if:
+  - The car matches.
+  - The message clearly says the car was sold.
+
+==================================================
 VERDICTS
+==================================================
 - CORRECT:
-  - The car (rego/make/model) matches what appears in the messages.
-  - The action type matches the intent (REPAIR vs RECON_APPOINTMENT vs CUSTOMER_APPOINTMENT vs SOLD etc.).
-  - The key details (e.g. checklistItem for REPAIR, readiness for READY, category for RECON_APPOINTMENT, dateTime/name for CUSTOMER_APPOINTMENT) are clearly stated or directly implied.
-
+  - The type, car, and key details match the message.
+  - Minor paraphrasing is fine.
 - PARTIAL:
-  - The car is correct, but some important detail is incomplete, slightly off, or over-interpreted.
-  - Example: message says "this afternoon", action says "3pm today".
-
+  - The car and general intent are right, but some details are over-precise or slightly wrong (e.g., time format, extra words).
 - INCORRECT:
-  - The action invents a car, rego, category, appointment, destination, or other details that are not in the messages.
-  - The type is wrong (e.g. RECON_APPOINTMENT when the message only says "needs a bonnet" with no appointment).
-  - Or it attaches the right detail to the wrong car.
-
+  - Wrong car, wrong type, or clear hallucination (e.g., appointment that never existed, provider that is not mentioned, extra vehicles that are not in the text).
+  - Do NOT mark INCORRECT just because the message does not mention "appointment" for non-appointment types (DROP_OFF, NEXT_LOCATION, TASK, etc.).
 - UNSURE:
-  - The message hints at the action but is too vague to be confident.
-  - Use UNSURE if you cannot find a clean quote as evidence.
+  - The message is too vague or ambiguous to be confident.
 
+==================================================
 EVIDENCE + REASON
+==================================================
 - For CORRECT and PARTIAL:
-  - "evidenceText" MUST be a minimal direct quote from the messages (copy-paste from the text).
-  - "reason" is a short sentence like:
-    - "Message explicitly mentions engine replacement for ATS355."
-    - "Message says XR6 ute is fixed and ready for a quick clean."
+  - "evidenceText" MUST be a short direct quote from the messages (copy-paste from the text).
+  - "reason" is a short sentence, e.g.:
+    - "Message explicitly mentions taking the CLA250 to Unique."
+    - "Message says Hilux goes from Unique to Imad."
 - For INCORRECT:
-  - Prefer a short reason explaining what is wrong:
-    - "No appointment mentioned in any message."
-    - "Message never mentions category 'Mechanical'."
+  - "reason" should explain WHAT is wrong:
+    - "No mention of any appointment in the messages."
+    - "Message never mentions Toyota Hilux."
+    - "Destination 'Total Care' is not in any message."
   - If there is no supporting quote, evidenceText may be "".
 - For UNSURE:
-  - Explain briefly why it is unclear.
+  - Briefly explain why it is unclear.
 
+==================================================
 INDEXING
-- You will see "MESSAGES:" listed 1-based.
-- You will see "ACTIONS:" listed 1-based.
+==================================================
+- "MESSAGES:" are listed 1-based.
+- "ACTIONS:" are listed 1-based.
 - For each audit item:
   - "actionIndex" MUST be 0-based (action 1 → 0, action 2 → 1, etc.).
   - If you use "evidenceSourceIndex", it MUST be the 1-based index of the message line from the MESSAGES list that contains your evidenceText.
 
+==================================================
 SUMMARY
+==================================================
 - "summary.total" = number of actions.
-- "summary.correct" = count of items with verdict "CORRECT".
-- "summary.partial" = count of items with verdict "PARTIAL".
-- "summary.incorrect" = count of items with verdict "INCORRECT".
-- "summary.unsure" = count of items with verdict "UNSURE".
+- "summary.correct" = actions with verdict "CORRECT".
+- "summary.partial" = actions with verdict "PARTIAL".
+- "summary.incorrect" = actions with verdict "INCORRECT".
+- "summary.unsure" = actions with verdict "UNSURE".
 `;
 
 /* ────────────────────────────────────────────

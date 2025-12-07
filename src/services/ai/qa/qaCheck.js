@@ -153,7 +153,7 @@ TYPE-SPECIFIC INTERPRETATION
   - "Booked with Imad for bumper repair."
   - "Jan is coming to fix Civic airbag light."
 - CORRECT only when the message clearly implies a booking or service appointment.
-- If the message ONLY says the car "needs" something with no booking/appointment and the action pretends there is an appointment with a provider, treat that as at best PARTIAL or INCORRECT (depending on how strong the hallucination is).
+- If the message mentions that there is a repair that needs to be done, e.g RECON_APPOINTMENT: Holden Commodore Rear Bumper. That is correct and it should be a recon appointment because the team will see it added the rest of the details.
 
 6) REPAIR
 - Faults, damage, or mechanical/body work:

@@ -2,8 +2,20 @@
 require("dotenv").config();
 const { z } = require("zod");
 
+// If you're on Node < 18, fetch isn't available by default.
+// This keeps your Gemini REST call working reliably.
+let fetchFn = global.fetch;
+if (!fetchFn) {
+  try {
+    fetchFn = require("node-fetch");
+  } catch (_) {
+    fetchFn = null;
+  }
+}
+
 // --- env ---
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini"; // override in Railway if you want
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || "";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
@@ -15,16 +27,26 @@ try {
   OpenAI = null;
 }
 
-const openai = (OPENAI_API_KEY && OpenAI)
-  ? new OpenAI({ apiKey: OPENAI_API_KEY })
-  : null;
+const openai =
+  OPENAI_API_KEY && OpenAI ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
+
+// ✅ Debug: shows exactly why your pipeline is "skipping"
+console.log("[LLM] OPENAI_API_KEY present:", !!OPENAI_API_KEY);
+console.log("[LLM] OpenAI SDK loaded:", !!OpenAI);
+console.log("[LLM] OpenAI client created:", !!openai);
+console.log("[LLM] OPENAI_MODEL:", OPENAI_MODEL);
+console.log("[LLM] GOOGLE_API_KEY present:", !!GOOGLE_API_KEY);
+console.log("[LLM] fetch available:", !!fetchFn);
 
 // ---------- helpers ----------
 function extractJson(s) {
   if (!s) return {};
-  const m = String(s).match(/{[\s\S]*}/);
+  const str = String(s);
+
+  // best-effort: pull first {...} block
+  const m = str.match(/{[\s\S]*}/);
   try {
-    return m ? JSON.parse(m[0]) : JSON.parse(s);
+    return m ? JSON.parse(m[0]) : JSON.parse(str);
   } catch {
     return {};
   }
@@ -33,8 +55,16 @@ function extractJson(s) {
 // ---------- Gemini REST generate ----------
 async function geminiGenerate(parts, genCfg = {}) {
   if (!GOOGLE_API_KEY) return "";
-  const url = `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(GOOGLE_API_KEY)}`;
-  const resp = await fetch(url, {
+  if (!fetchFn) {
+    console.warn("[LLM] Gemini REST blocked: fetch not available (Node < 18 and node-fetch not installed).");
+    return "";
+  }
+
+  const url = `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(
+    GOOGLE_API_KEY
+  )}`;
+
+  const resp = await fetchFn(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -45,7 +75,7 @@ async function geminiGenerate(parts, genCfg = {}) {
 
   if (!resp.ok) {
     const t = await resp.text();
-    console.warn(`Gemini REST ${resp.status}: ${t.slice(0, 400)}`);
+    console.warn(`[LLM] Gemini REST ${resp.status}: ${t.slice(0, 400)}`);
     return "";
   }
 
@@ -53,15 +83,21 @@ async function geminiGenerate(parts, genCfg = {}) {
   return j?.candidates?.[0]?.content?.parts?.[0]?.text || "";
 }
 
-// ---------- OpenAI JSON chat ----------
+// ---------- OpenAI JSON chat (replacement for xAI Grok) ----------
 async function chatJSON({ system, user, temperature = 0 }) {
-  if (!openai) return {};
+  // If this triggers, your pipeline will "skip" because it gets {}
+  if (!openai) {
+    console.warn(
+      "[LLM] chatJSON blocked: OpenAI client is null (missing OPENAI_API_KEY or OpenAI SDK not installed)."
+    );
+    return {};
+  }
 
   try {
     const resp = await openai.chat.completions.create({
-      // Cheap + strong option:
-      model: "gpt-4o-mini",
+      model: OPENAI_MODEL,
       temperature,
+      // JSON mode: forces valid JSON output
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: system ?? "" },
@@ -69,10 +105,25 @@ async function chatJSON({ system, user, temperature = 0 }) {
       ],
     });
 
-    const content = resp.choices?.[0]?.message?.content || "{}";
-    return extractJson(content);
+    const content = resp?.choices?.[0]?.message?.content || "{}";
+    const out = extractJson(content);
+
+    // Extra guard: if model returns empty/non-json for some reason
+    if (!out || typeof out !== "object" || Array.isArray(out)) {
+      console.warn("[LLM] chatJSON got non-object JSON. Raw:", String(content).slice(0, 300));
+      return {};
+    }
+
+    return out;
   } catch (e) {
-    console.warn("OpenAI chatJSON error:", e?.message || e);
+    // ✅ DO NOT hide errors — this is the root of the "skipped" pipeline symptom
+    console.warn("[LLM] OpenAI chatJSON error:", {
+      message: e?.message,
+      status: e?.status,
+      code: e?.code,
+      type: e?.type,
+      apiError: e?.error,
+    });
     return {};
   }
 }
@@ -106,13 +157,30 @@ Rules:
   - "analysis" is a short condition note (e.g., "front bumper dent", "at Haytham's", "muddy", "needs wash").
 - If NOT a vehicle:
   - "make","model","rego","colorDescription" must stay "".
-  - "analysis" must clearly describe the subject, short and specific.
+  - "analysis" must clearly describe the subject, short and specific:
+    Examples:
+      - "oil leak on floor under engine bay"
+      - "engine oil puddle"
+      - "check engine light illuminated"
+      - "dashboard light visible but unclear"
+      - "pile of spare parts"
+      - "wheel rim with damage"
+      - "removed bumper"
+      - "engine bay close-up"
+      - "tool box and parts on floor"
 - Never output placeholder words like "Rego" or "None". If unsure, use "".
 - Always return valid JSON with exactly these 5 keys.`;
 
+  // ensure non-empty photo
   if (!base64 || base64.length < 50000) {
     console.warn("⚠️ Image too short, skipping Gemini photo analysis");
-    return { make: "", model: "", rego: "", colorDescription: "", analysis: "no image detected" };
+    return {
+      make: "",
+      model: "",
+      rego: "",
+      colorDescription: "",
+      analysis: "no image detected",
+    };
   }
 
   const raw = await geminiGenerate(
@@ -133,6 +201,7 @@ Rules:
   const out = parsed.data;
   out.rego = (out.rego || "").replace(/\s+/g, "").toUpperCase();
 
+  // sanity fix: prevent nonsense placeholders
   if (out.rego === "REGO") out.rego = "";
   if (/^rego$/i.test(out.make)) out.make = "";
   if (/^rego$/i.test(out.model)) out.model = "";

@@ -2,8 +2,7 @@
 require("dotenv").config();
 const { z } = require("zod");
 
-// If you're on Node < 18, fetch isn't available by default.
-// This keeps your Gemini REST call working reliably.
+// ----- fetch support (Node 18+ has global fetch; older Node needs node-fetch) -----
 let fetchFn = global.fetch;
 if (!fetchFn) {
   try {
@@ -15,7 +14,7 @@ if (!fetchFn) {
 
 // --- env ---
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini"; // override in Railway if you want
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini"; // set in Railway Variables if you want
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || "";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
@@ -30,20 +29,23 @@ try {
 const openai =
   OPENAI_API_KEY && OpenAI ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
-// ✅ Debug: shows exactly why your pipeline is "skipping"
+// ✅ Loud startup diagnostics (these lines are what you check in Railway logs)
+console.log("============================================================");
+console.log("[LLM] Boot diagnostics");
+console.log("[LLM] Node version:", process.version);
+console.log("[LLM] OPENAI_MODEL:", OPENAI_MODEL);
 console.log("[LLM] OPENAI_API_KEY present:", !!OPENAI_API_KEY);
+console.log("[LLM] OPENAI_API_KEY length:", OPENAI_API_KEY.length); // SAFE: does not expose key
 console.log("[LLM] OpenAI SDK loaded:", !!OpenAI);
 console.log("[LLM] OpenAI client created:", !!openai);
-console.log("[LLM] OPENAI_MODEL:", OPENAI_MODEL);
 console.log("[LLM] GOOGLE_API_KEY present:", !!GOOGLE_API_KEY);
 console.log("[LLM] fetch available:", !!fetchFn);
+console.log("============================================================");
 
 // ---------- helpers ----------
 function extractJson(s) {
   if (!s) return {};
   const str = String(s);
-
-  // best-effort: pull first {...} block
   const m = str.match(/{[\s\S]*}/);
   try {
     return m ? JSON.parse(m[0]) : JSON.parse(str);
@@ -56,7 +58,7 @@ function extractJson(s) {
 async function geminiGenerate(parts, genCfg = {}) {
   if (!GOOGLE_API_KEY) return "";
   if (!fetchFn) {
-    console.warn("[LLM] Gemini REST blocked: fetch not available (Node < 18 and node-fetch not installed).");
+    console.warn("[LLM] Gemini blocked: fetch not available (Node<18 and node-fetch not installed).");
     return "";
   }
 
@@ -83,13 +85,19 @@ async function geminiGenerate(parts, genCfg = {}) {
   return j?.candidates?.[0]?.content?.parts?.[0]?.text || "";
 }
 
-// ---------- OpenAI JSON chat (replacement for xAI Grok) ----------
+// ---------- OpenAI JSON chat ----------
 async function chatJSON({ system, user, temperature = 0 }) {
   // If this triggers, your pipeline will "skip" because it gets {}
+  if (!OpenAI) {
+    console.warn("[LLM] chatJSON blocked: OpenAI SDK not installed/loaded.");
+    return {};
+  }
+  if (!OPENAI_API_KEY) {
+    console.warn("[LLM] chatJSON blocked: OPENAI_API_KEY missing (Railway Variables not applied to this service).");
+    return {};
+  }
   if (!openai) {
-    console.warn(
-      "[LLM] chatJSON blocked: OpenAI client is null (missing OPENAI_API_KEY or OpenAI SDK not installed)."
-    );
+    console.warn("[LLM] chatJSON blocked: OpenAI client failed to init (unexpected).");
     return {};
   }
 
@@ -97,7 +105,6 @@ async function chatJSON({ system, user, temperature = 0 }) {
     const resp = await openai.chat.completions.create({
       model: OPENAI_MODEL,
       temperature,
-      // JSON mode: forces valid JSON output
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: system ?? "" },
@@ -108,15 +115,13 @@ async function chatJSON({ system, user, temperature = 0 }) {
     const content = resp?.choices?.[0]?.message?.content || "{}";
     const out = extractJson(content);
 
-    // Extra guard: if model returns empty/non-json for some reason
     if (!out || typeof out !== "object" || Array.isArray(out)) {
-      console.warn("[LLM] chatJSON got non-object JSON. Raw:", String(content).slice(0, 300));
+      console.warn("[LLM] chatJSON non-object output. Raw:", String(content).slice(0, 400));
       return {};
     }
 
     return out;
   } catch (e) {
-    // ✅ DO NOT hide errors — this is the root of the "skipped" pipeline symptom
     console.warn("[LLM] OpenAI chatJSON error:", {
       message: e?.message,
       status: e?.status,
@@ -157,30 +162,13 @@ Rules:
   - "analysis" is a short condition note (e.g., "front bumper dent", "at Haytham's", "muddy", "needs wash").
 - If NOT a vehicle:
   - "make","model","rego","colorDescription" must stay "".
-  - "analysis" must clearly describe the subject, short and specific:
-    Examples:
-      - "oil leak on floor under engine bay"
-      - "engine oil puddle"
-      - "check engine light illuminated"
-      - "dashboard light visible but unclear"
-      - "pile of spare parts"
-      - "wheel rim with damage"
-      - "removed bumper"
-      - "engine bay close-up"
-      - "tool box and parts on floor"
+  - "analysis" must clearly describe the subject, short and specific.
 - Never output placeholder words like "Rego" or "None". If unsure, use "".
 - Always return valid JSON with exactly these 5 keys.`;
 
-  // ensure non-empty photo
   if (!base64 || base64.length < 50000) {
     console.warn("⚠️ Image too short, skipping Gemini photo analysis");
-    return {
-      make: "",
-      model: "",
-      rego: "",
-      colorDescription: "",
-      analysis: "no image detected",
-    };
+    return { make: "", model: "", rego: "", colorDescription: "", analysis: "no image detected" };
   }
 
   const raw = await geminiGenerate(
@@ -201,7 +189,6 @@ Rules:
   const out = parsed.data;
   out.rego = (out.rego || "").replace(/\s+/g, "").toUpperCase();
 
-  // sanity fix: prevent nonsense placeholders
   if (out.rego === "REGO") out.rego = "";
   if (/^rego$/i.test(out.make)) out.make = "";
   if (/^rego$/i.test(out.model)) out.model = "";

@@ -5,14 +5,14 @@ const CustomerAppointmentSchema = new mongoose.Schema(
   {
     name: { type: String, default: 'Customer' },
 
-    // Primary free-text datetime used by the UI
     dateTime: { type: String, default: '' },
 
-    // When moved to Delivery, we stash the original time here
     originalDateTime: { type: String, default: '' },
 
-    // Flag that this row is in the Delivery table
     isDelivery: { type: Boolean, default: false },
+
+    // ✅ THIS IS THE MISSING PIECE
+    isFollowUp: { type: Boolean, default: false },
 
     notes: { type: String, default: '' },
 
@@ -24,4 +24,7 @@ const CustomerAppointmentSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-module.exports = mongoose.model('CustomerAppointment', CustomerAppointmentSchema);
+module.exports = mongoose.model(
+  'CustomerAppointment',
+  CustomerAppointmentSchema
+);

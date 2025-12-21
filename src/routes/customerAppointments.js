@@ -23,13 +23,19 @@ function buildUpdate(body) {
 
   if (Object.prototype.hasOwnProperty.call(body, 'originalDateTime')) {
     out.originalDateTime =
-      typeof body.originalDateTime === 'string' ? body.originalDateTime.trim() : body.originalDateTime;
+      typeof body.originalDateTime === 'string'
+        ? body.originalDateTime.trim()
+        : body.originalDateTime;
   }
 
   if (Object.prototype.hasOwnProperty.call(body, 'isDelivery')) {
-    // accept boolean or "true"/"false"
     const v = body.isDelivery;
     out.isDelivery = typeof v === 'string' ? v.toLowerCase() === 'true' : Boolean(v);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, 'isFollowUp')) {
+    const v = body.isFollowUp;
+    out.isFollowUp = typeof v === 'string' ? v.toLowerCase() === 'true' : Boolean(v);
   }
 
   if (Object.prototype.hasOwnProperty.call(body, 'notes')) {
@@ -38,7 +44,7 @@ function buildUpdate(body) {
 
   // car link (ObjectId) and carText fallback
   if (Object.prototype.hasOwnProperty.call(body, 'car')) {
-    out.car = body.car || null; // null clears link
+    out.car = body.car || null;
   }
   if (Object.prototype.hasOwnProperty.call(body, 'carText')) {
     out.carText = typeof body.carText === 'string' ? body.carText.trim() : body.carText;
@@ -81,37 +87,50 @@ router.put('/:id', async (req, res) => {
     const doc = await CustomerAppointment.findById(id);
     if (!doc) return res.status(404).json({ message: 'Appointment not found' });
 
-    // Track before for diff
     const before = {
       name: doc.name ?? '',
       dateTime: doc.dateTime ?? '',
       originalDateTime: doc.originalDateTime ?? '',
       isDelivery: !!doc.isDelivery,
+      isFollowUp: !!doc.isFollowUp,
       notes: doc.notes ?? '',
       car: doc.car ? String(doc.car) : '',
       carText: doc.carText ?? '',
     };
 
-    // Apply updates if present
-    if (Object.prototype.hasOwnProperty.call(update, 'name')) doc.name = update.name;
-    if (Object.prototype.hasOwnProperty.call(update, 'dateTime')) doc.dateTime = update.dateTime;
-    if (Object.prototype.hasOwnProperty.call(update, 'originalDateTime')) doc.originalDateTime = update.originalDateTime;
-    if (Object.prototype.hasOwnProperty.call(update, 'isDelivery')) doc.isDelivery = update.isDelivery;
-    if (Object.prototype.hasOwnProperty.call(update, 'notes')) doc.notes = update.notes;
-    if (Object.prototype.hasOwnProperty.call(update, 'car')) doc.car = update.car;
-    if (Object.prototype.hasOwnProperty.call(update, 'carText')) doc.carText = update.carText;
+    if ('name' in update) doc.name = update.name;
+    if ('dateTime' in update) doc.dateTime = update.dateTime;
+    if ('originalDateTime' in update) doc.originalDateTime = update.originalDateTime;
+
+    if ('isDelivery' in update) {
+      doc.isDelivery = update.isDelivery;
+      if (update.isDelivery) doc.isFollowUp = false;
+    }
+
+    if ('isFollowUp' in update) {
+      doc.isFollowUp = update.isFollowUp;
+      if (update.isFollowUp) doc.isDelivery = false;
+    }
+
+    if ('notes' in update) doc.notes = update.notes;
+    if ('car' in update) doc.car = update.car;
+    if ('carText' in update) doc.carText = update.carText;
 
     const after = {
       name: doc.name ?? '',
       dateTime: doc.dateTime ?? '',
       originalDateTime: doc.originalDateTime ?? '',
       isDelivery: !!doc.isDelivery,
+      isFollowUp: !!doc.isFollowUp,
       notes: doc.notes ?? '',
       car: doc.car ? String(doc.car) : '',
       carText: doc.carText ?? '',
     };
 
-    const changed = Object.keys(after).some(k => String(before[k]) !== String(after[k]));
+    const changed = Object.keys(after).some(
+      (k) => String(before[k]) !== String(after[k])
+    );
+
     if (!changed) {
       const unchanged = await doc.populate('car', 'rego make model');
       return res.json({ message: 'No changes detected', data: unchanged });

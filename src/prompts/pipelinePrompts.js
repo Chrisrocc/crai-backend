@@ -434,10 +434,18 @@ Return STRICT minified JSON only:
 ]}
 
 Rules:
-- "location" is where the car is now or will be located based on the text.
-- If no clear location is present, leave "location":"".
-- Do NOT create extra actions; only output actions if the line clearly describes a car’s location.
+- You MUST populate "location" when the line contains ANY named place after words like:
+  "at", "in", "inside", "out front of", "behind", "near", "from", "to", "back at".
+  Examples:
+  - "At Northpoint" → location:"Northpoint"
+  - "is parked at Northpoint" → location:"Northpoint"
+  - "is at Haytham's" → location:"Haytham's"
+  - "moved from Unique to Imad" → location:"Imad" (current/now location)
+- If the location is a generic/non-name (e.g. "car park", "driveway", "outside", "on the road"), leave location:"".
+- Do NOT invent locations. Only copy the named place that appears in the line.
+- Output an action only if the line clearly states a location for a specific car.
 `;
+
 
 // ----------------------- SOLD -----------------------
 const EXTRACT_SOLD = `

@@ -356,6 +356,15 @@ Duplication rules:
   NEXT_LOCATION - Christian: "Drop off Dmax to Capital."
 
 Do NOT hallucinate extra lines or cars. Work only with the text you see.
+
+// ✅ ADDED (specificity / robustness): HARD LOCATION_UPDATE RULE
+HARD LOCATION_UPDATE RULE (DO NOT BREAK):
+- A line can ONLY be categorized as LOCATION_UPDATE if the line itself contains a clear vehicle identifier:
+  - a rego, OR
+  - make+model, OR
+  - an unambiguous model name that implies make.
+- If the line is ONLY a person's location ("Joseph is at Al's", "I'm at Capital", "At Al's") with no vehicle identifier in the same line,
+  it MUST NOT be LOCATION_UPDATE. Use TASK (people logistics) or OTHER instead.
 `;
 
 // Step 3: Categorize (dynamic; uses keywords + rules)
@@ -398,6 +407,15 @@ Duplication:
 - If the same line is both a movement (DROP_OFF/LOCATION_UPDATE) and a service job, duplicate as DROP_OFF (or LOCATION_UPDATE) and REPAIR.
 - If a line clearly describes damage/repairs needed, you MUST include a REPAIR category (and then you may also duplicate as RECON_APPOINTMENT).
 - Do NOT invent cars, appointments, or locations; work only with the text in the line.
+
+// ✅ ADDED (specificity / robustness): HARD LOCATION_UPDATE RULE
+HARD LOCATION_UPDATE RULE (DO NOT BREAK):
+- A line can ONLY be categorized as LOCATION_UPDATE if the line itself contains a clear vehicle identifier:
+  - a rego, OR
+  - make+model, OR
+  - an unambiguous model name that implies make.
+- If the line is ONLY a person's location ("Joseph is at Al's", "I'm at Capital", "At Al's") with no vehicle identifier in the same line,
+  it MUST NOT be LOCATION_UPDATE. Use TASK (people logistics) or OTHER instead.
 `;
 }
 
@@ -444,6 +462,16 @@ Rules:
 - If the location is a generic/non-name (e.g. "car park", "driveway", "outside", "on the road"), leave location:"".
 - Do NOT invent locations. Only copy the named place that appears in the line.
 - Output an action only if the line clearly states a location for a specific car.
+
+// ✅ ADDED (specificity / robustness): VEHICLE IDENTIFIER REQUIREMENT (HARD GATE)
+VEHICLE IDENTIFIER REQUIREMENT (HARD GATE):
+- Output ZERO actions unless the SAME line contains at least one of:
+  (a) rego, OR
+  (b) make+model, OR
+  (c) an unambiguous model name that implies make.
+- If the line lacks vehicle identifiers, return {"actions":[]} for that input.
+- Person-only location lines (e.g., "Joseph is at Al's", "I'm at Capital", "At Al's") must return {"actions":[]} .
+- Do NOT infer a vehicle from earlier/later lines. Only use the current line text.
 `;
 
 

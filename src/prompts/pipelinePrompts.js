@@ -110,7 +110,7 @@ Core rules:
 - Merge or rewrite fragmented sentences so each final message is clear and standalone.
 - Normalize casual or shorthand phrasing into full, natural statements.
 - Do NOT include irrelevant chatter or system text.
-- If no actionable messages remain, return {"messages":[]}.
+- If no actionable messages remain, return {"messages":[]}. 
 
 Hard NO-HALLUCINATION rule:
 - Do NOT invent cars, regos, locations, people, times, tasks, or appointments.
@@ -188,6 +188,21 @@ Style rules (examples condensed):
 - If removing the generic location leaves only the car description, keep the car description clean.
 
 If no actionable content remains, return {"messages":[]}.
+
+// ✅ ADDED (specificity / robustness): CRITICAL CONTEXT CARRY-FORWARD (within the same speaker)
+// Goal: prevent rego loss when users send photo first then a short location fragment like "at northpoint"
+CRITICAL CONTEXT CARRY-FORWARD (within the same speaker):
+- If a line states a vehicle identifier (rego OR make+model OR model) and a following line from the SAME speaker is a location-only fragment
+  (e.g., "at northpoint", "at Al's", "at MMM", "at capital", "back at northpoint", "moved to Al's"),
+  then rewrite the location line to include the last vehicle identifier from the SAME speaker so the location line stands alone.
+  Example:
+  Christian: "Photo analysis: Ford Falcon XR6 silver sedan, rego 1TV6FA — Hazy headlights, dull paint, needs wash."
+  Christian: "at northpoint"
+  Output location line should become something like:
+  "Ford Falcon XR6, rego 1TV6FA is at Northpoint."
+- Do NOT do this across different speakers.
+- Do NOT invent missing regos; only carry forward identifiers that appear earlier in the same speaker’s recent lines in this same input.
+- If there is no prior vehicle identifier from the same speaker, do NOT attach anything. Leave as-is or drop if non-actionable.
 `;
 
 // =======================
@@ -365,6 +380,17 @@ HARD LOCATION_UPDATE RULE (DO NOT BREAK):
   - an unambiguous model name that implies make.
 - If the line is ONLY a person's location ("Joseph is at Al's", "I'm at Capital", "At Al's") with no vehicle identifier in the same line,
   it MUST NOT be LOCATION_UPDATE. Use TASK (people logistics) or OTHER instead.
+
+// ✅ ADDED (specificity / robustness): PHOTO COSMETIC RULE (HARD)
+// Goal: stop "hazy headlights / dull paint / needs wash" from becoming REPAIR unless explicitly instructed
+PHOTO COSMETIC RULE (HARD):
+- If a line begins with "[PHOTO]" OR contains "Photo analysis:" and it only describes cosmetic condition/appearance
+  (e.g., hazy headlights, dull paint, needs wash, dirty, dusty, dull, minor marks, light scratches, scuffs, small chips)
+  AND it does NOT explicitly instruct repair/replacement or does NOT clearly state something is broken/malfunctioning,
+  then it MUST NOT be categorized as REPAIR.
+  - Prefer OTHER for observations.
+  - Use TASK only if the line is an instruction (e.g., "Wash it", "Detail it", "Take photos", "Clean it").
+// IMPORTANT: do not block true repairs: "headlight is cracked", "replace headlight", "AC not working" are REPAIR.
 `;
 
 // Step 3: Categorize (dynamic; uses keywords + rules)
@@ -416,6 +442,17 @@ HARD LOCATION_UPDATE RULE (DO NOT BREAK):
   - an unambiguous model name that implies make.
 - If the line is ONLY a person's location ("Joseph is at Al's", "I'm at Capital", "At Al's") with no vehicle identifier in the same line,
   it MUST NOT be LOCATION_UPDATE. Use TASK (people logistics) or OTHER instead.
+
+// ✅ ADDED (specificity / robustness): PHOTO COSMETIC RULE (HARD)
+// Goal: stop cosmetic photo observations from turning into REPAIR unless explicitly instructed
+PHOTO COSMETIC RULE (HARD):
+- If a line begins with "[PHOTO]" OR contains "Photo analysis:" and it only describes cosmetic condition/appearance
+  (e.g., hazy headlights, dull paint, needs wash, dirty, dusty, dull, minor marks, light scratches, scuffs, small chips)
+  AND it does NOT explicitly instruct repair/replacement or does NOT clearly state something is broken/malfunctioning,
+  then it MUST NOT be categorized as REPAIR.
+  - Prefer OTHER for observations.
+  - Use TASK only if the line is an instruction (e.g., "Wash it", "Detail it", "Take photos", "Clean it").
+// IMPORTANT: do not block true repairs: "headlight is cracked", "replace headlight", "AC not working" are REPAIR.
 `;
 }
 
@@ -474,7 +511,6 @@ VEHICLE IDENTIFIER REQUIREMENT (HARD GATE):
 - Do NOT infer a vehicle from earlier/later lines. Only use the current line text.
 `;
 
-
 // ----------------------- SOLD -----------------------
 const EXTRACT_SOLD = `
 From only SOLD lines, extract actions.
@@ -506,6 +542,27 @@ Return STRICT minified JSON only:
 - Use ONLY faults / repairs explicitly mentioned in the line.
 - If there are multiple distinct repairs for the SAME car in the SAME line, you may output multiple REPAIR actions.
 - Never invent extra repairs or cars.
+
+// ✅ ADDED (specificity / robustness): STRICT REPAIR GATE
+STRICT REPAIR GATE:
+- Only output REPAIR actions if the line explicitly instructs repair/replacement or clearly states a malfunction/breakage.
+  Examples that ARE REPAIR:
+  - "needs new bonnet"
+  - "replace headlight"
+  - "AC not working"
+  - "oil leak"
+  - "brake lights not working"
+  - "broken mirror"
+  - "cracked windscreen"
+- Examples that are NOT REPAIR by themselves (cosmetic/cleaning observation):
+  - "hazy headlights"
+  - "dull paint"
+  - "needs a wash"
+  - "dirty"
+  - "dusty"
+  - "needs detail"
+  These belong to TASK (if instruction) or OTHER (if observation), not REPAIR.
+- If the line is purely cosmetic observation with no explicit repair instruction, output {"actions":[]} for that input.
 `;
 
 // ----------------------- READY -----------------------
@@ -556,7 +613,6 @@ Return STRICT minified JSON only:
 - Only output actions if the line clearly implies a viewing or pickup.
 `;
 
-// ----------------------- RECON_APPOINTMENT (DB-DRIVEN; NO HARDCODED RULES) -----------------------
 // ----------------------- RECON_APPOINTMENT (DB-DRIVEN; WITH NOTES) -----------------------
 function EXTRACT_RECON_APPOINTMENT_FROM_DB(
   ALLOWED_CATEGORY_LIST,
@@ -624,9 +680,15 @@ Additional rules:
 - Output 1+ actions PER INPUT LINE (never silently drop a line).
 - Strings only. Unknown → "".
 - Keep keys in EXACT order as shown above.
+
+// ✅ ADDED (specificity / robustness): AVOID COSMETIC PHOTO NOISE BECOMING RECON
+AVOID COSMETIC PHOTO NOISE BECOMING RECON:
+- If a RECON_APPOINTMENT line is only a cosmetic photo observation like "hazy headlights", "dull paint", "needs wash"
+  and there is no explicit booking/provider/service instruction, then:
+  - still follow the existing rule "output at least one action", BUT set category:"Other" and leave notes:"" unless the line contains explicit job wording.
+  - Do NOT turn cosmetic observation into a repair booking unless user text implies booking/taking to a provider.
 `;
 }
-
 
 // ----------------------- NEXT_LOCATION -----------------------
 const EXTRACT_NEXT_LOCATION = `
